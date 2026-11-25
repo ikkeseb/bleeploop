@@ -193,13 +193,22 @@
   before the engine has taken the newer one, which the engine can still refuse (latency), leaving the
   slot with neither; b) a source parked after a failed reactivation is not replaced by a newer source
   that seats while it is out (the projected head omits it), so it keeps its owner and tone until it
-  retries; c) at shutdown a removal the full port refused leaves the unit seated, and the device's close
-  hands it back as `Evicted`, so its tone is kept, not retired; d) a plugin owner retrying `PortFull`
-  after its add's command returned can lose its place to a later edit on that slot; e) a built-in add
+  retries; c) a plugin owner retrying `PortFull`
+  after its add's command returned can lose its place to a later edit on that slot; d) a built-in add
   answered `waiting` whose box a rebuild returns after the 10 s first-answer bound is dropped instead of
-  offered to the new engine; f) a reload the engine refused can log a generic cause when its row is
+  offered to the new engine; e) a reload the engine refused can log a generic cause when its row is
   released before the waiter polls. Sources and built-in factories arrive with E3. Next check: one
   `chain_tests.rs`/`chain_cmds_tests.rs` test per letter, red first, before chains reach players.
+- A clean chain unit's tone is not pinned (DEV chain mode, read from source, never run; a plan review's
+  finding, left for later in E3f): a plugin unit that never saved its own `unit-<id>.tone` (nothing was
+  changed) reads its plugin's slot file at every load (`ToneStore::load_for_restore_key`'s fallback). When
+  another instance of that plugin in that slot retires its tone into that file (the player removes it), the
+  clean unit's next load, at the next launch's restore under its id, starts from the other instance's tone,
+  not the one it played. The shutdown no longer retires (`EngineHost::remove_unit_at_shutdown`), so only a
+  player's removal does this. Next check: a `chain_cmds_tests.rs` test with two units of one plugin in slot
+  0, the first never saving, the second saving a new tone and removed by the player, then `unload_all` and
+  the first re-added under its id: read the tone its load restores. A fix writes the inherited tone to
+  `unit-<id>.tone` at a unit's first load.
 - Two `chain_tests.rs` tests are `#[ignore]`d (quarantined): `held_remove_outlives_remove_timeout` and
   `legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_refusal`. On CI's Windows
   runner (`rust-test`) their `start_take` never sees lane 0 recording, even with `test_rig::PATIENCE`

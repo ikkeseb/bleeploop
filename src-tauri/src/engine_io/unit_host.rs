@@ -263,6 +263,11 @@ pub(crate) struct Table {
     /// replace (`EngineHost::reload_unit`): used on promotion and when `Left::Replaced` arrives
     /// before `Event::Seat` drains.
     reload_predecessor: BTreeMap<InstallToken, InstallToken>,
+    /// The ids the host's shutdown removed ([`EngineHost::remove_unit_at_shutdown`]): their owners keep
+    /// `unit-<id>.tone` where it is ([`UnitHost::keeps_tone`]) instead of retiring it into the slot's file,
+    /// so the rig record's restore at the next launch finds each unit's own tone
+    /// (`docs/unit-contract.md` § 1).
+    kept_tones: BTreeSet<UnitId>,
 }
 
 impl Table {
@@ -274,6 +279,7 @@ impl Table {
             next_legacy_owner: 1,
             received: BTreeMap::new(),
             reload_predecessor: BTreeMap::new(),
+            kept_tones: BTreeSet::new(),
         }
     }
 
@@ -1562,6 +1568,13 @@ impl UnitHost {
         state.table.row_mut(self.install).and_then(|r| r.mailbox.pop_front())
     }
 
+    /// Whether the host's shutdown removed this unit ([`EngineHost::remove_unit_at_shutdown`]): its owner
+    /// keeps `unit-<id>.tone` instead of retiring it into the slot's file.
+    pub fn keeps_tone(&self) -> bool {
+        let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.table.kept_tones.contains(&self.id)
+    }
+
     /// Whether this row's removal is under way and its box not yet delivered ([`Leave::Pending`] or
     /// [`Leave::Settled`]): a stopping owner waits for that box, never for a seated unit's.
     pub fn removal_in_flight(&self) -> bool {
@@ -1771,8 +1784,19 @@ impl EngineHost {
     }
 
     /// Remove `id`: a failed add's plate goes at once ([`Removal::Plate`]); otherwise the removal is
-    /// sent, and the plate leaves at its `Applied`.
+    /// sent, and the plate leaves at its `Applied`. Its owner retires the unit's tone into the slot's file.
     pub fn remove_unit(&self, id: UnitId) -> Result<Removal, String> {
+        self.remove(id, false)
+    }
+
+    /// [`EngineHost::remove_unit`] for the host's shutdown (`Chains::unload_all`): the owner keeps
+    /// `unit-<id>.tone` where it is ([`UnitHost::keeps_tone`]), so the next launch's restore of the unit
+    /// under its id finds its own tone. A removal already under way (the player's) keeps its retire.
+    pub fn remove_unit_at_shutdown(&self, id: UnitId) -> Result<Removal, String> {
+        self.remove(id, true)
+    }
+
+    fn remove(&self, id: UnitId, keep_tone: bool) -> Result<Removal, String> {
         let slot = {
             let state = self.core.state.lock().unwrap_or_else(|e| e.into_inner());
             state
@@ -1797,6 +1821,10 @@ impl EngineHost {
         let failed_no_seat = plate.state == PlateState::Failed && !parked && !seated_in_engine;
         let has_pending_install = state.model.has_pending_install(slot, id);
         let owner_token = state.table.active_row_for_id(id).map(|r| r.token);
+        // Before anything below can post the owner its terminal `Back`, under the same lock.
+        if keep_tone {
+            state.table.kept_tones.insert(id);
+        }
 
         if failed_no_seat {
             state.model.remove_plate(slot, id);

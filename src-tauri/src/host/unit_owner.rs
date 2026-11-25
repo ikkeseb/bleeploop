@@ -387,7 +387,7 @@ fn fail_before_seat<P: OwnedPlugin>(
 
 /// Ordered release once the unit is out of the engine (or none is held after `Dismissed`): close any
 /// editor → fold a last `turn` into the tone → `quiesce` → save if dirty or editor was open →
-/// optionally `retire` → `release(unit)` → `host.release()`. Skips `turn`, save and `retire` after a
+/// optionally `retire` (never for a unit the host's shutdown removed) → `release(unit)` → `host.release()`. Skips `turn`, save and `retire` after a
 /// panic.
 #[allow(clippy::too_many_arguments)]
 fn ordered_release<P: OwnedPlugin>(
@@ -419,7 +419,9 @@ fn ordered_release<P: OwnedPlugin>(
     if keep {
         let _ = keep_tone(tone, slot, "unload", name, || plugin.state());
     }
-    if allow_save && retire {
+    // The host's shutdown keeps the unit's own file for the next launch's restore under the same id
+    // (`EngineHost::remove_unit_at_shutdown`); any other removal retires it into the slot's file.
+    if allow_save && retire && !host.keeps_tone() {
         tone.retire();
     }
     plugin.release(unit);

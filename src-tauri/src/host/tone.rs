@@ -1298,6 +1298,40 @@ mod tests {
         assert_eq!(dir.store().revision(0, &identity()), 1);
     }
 
+    // Unit contract § 6: a v0.8.9 tone carries over. The bytes are v0.8.9's `encode` of one tone (run from
+    // `git show v0.8.9:src-tauri/src/host/tone.rs`, its `encode`, `put_bytes` and `fnv1a64` alone), stored
+    // as v0.8.9 named it (`slot0-<hash>.tone`); today's `encode` writes the same bytes. A chain unit of that
+    // plugin in that slot with a fresh id starts from it, read only: no unit file, the slot file untouched.
+    #[test]
+    fn a_v089_slot_tone_is_where_a_fresh_unit_of_its_plugin_starts() {
+        const V089: [u8; 64] = [
+            0x42, 0x4c, 0x54, 0x4e, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x63, 0x6c, 0x61, 0x70, 0x09, 0x00, 0x00, 0x00, 0x43, 0x3a,
+            0x5c, 0x78, 0x2e, 0x63, 0x6c, 0x61, 0x70, 0x05, 0x00, 0x00, 0x00, 0x6f, 0x72, 0x67, 0x2e, 0x78, 0x01, 0x00, 0x00, 0x00,
+            0x58, 0x0b, 0x00, 0x00, 0x00, 0x76, 0x30, 0x2e, 0x38, 0x2e, 0x39, 0x20, 0x74, 0x6f, 0x6e, 0x65, 0x3a, 0xef, 0x98, 0xdc,
+            0xd1, 0x6b, 0x65, 0x8a,
+        ];
+        let clap = ToneIdentity { format: "clap".into(), path: r"C:\x.clap".into(), id: "org.x".into() };
+        let v089 = Tone { identity: clap.clone(), name: "X".into(), state: b"v0.8.9 tone".to_vec() };
+        assert_eq!(encode(&v089), V089, "today's encode writes v0.8.9's bytes");
+        let dir = TempDir::new("v089-slot");
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let slot_file = dir.0.join("slot0-a77f40f9ad871724.tone");
+        assert_eq!(clap.file_name(0), "slot0-a77f40f9ad871724.tone");
+        std::fs::write(&slot_file, V089).unwrap();
+
+        let key = ToneKey::Unit { unit: 4242, slot: 0, identity: clap.clone() };
+        let (read, revision) = dir.store().load_for_restore_key(&key);
+        assert_eq!((read.unwrap(), revision), (Some(v089), 0));
+        let mut unit = ToneKeeper::new(Some(dir.unit_binding(4242, 0, clap.clone())), Arc::new(AtomicBool::new(false)));
+        assert_eq!(unit.stored().unwrap().as_deref(), Some(&b"v0.8.9 tone"[..]));
+        assert!(!dir.0.join("unit-4242.tone").exists(), "the fallback read writes no unit file");
+        assert_eq!(std::fs::read(&slot_file).unwrap(), V089, "the slot file is untouched");
+        assert_eq!(dir.store().revision(0, &clap), 0);
+        // The other slot has no tone of it.
+        let other = ToneKeeper::new(Some(dir.unit_binding(4243, 1, clap)), Arc::new(AtomicBool::new(false))).stored().unwrap();
+        assert_eq!(other, None);
+    }
+
     #[test]
     fn two_units_of_one_plugin_in_one_slot_keep_two_files() {
         let dir = TempDir::new("two-units");

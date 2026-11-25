@@ -417,6 +417,10 @@ pub fn run() {
             engine_io::midi_mode::midi_assign,
             #[cfg(windows)]
             engine_io::midi_mode::midi_import_legacy,
+            // DEV: the subscribe of a page in chain mode (its IN FX pedals switch units), in lockstep
+            // with the `chain_*` commands.
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::midi_mode::midi_subscribe_chain,
             // DEV: the MIDI benchmark's UI stalls (`engine_io/midi_bench.rs`; the frontend's side is
             // `src/platform/host.tauri.ts`, DEV only).
             #[cfg(all(windows, debug_assertions))]

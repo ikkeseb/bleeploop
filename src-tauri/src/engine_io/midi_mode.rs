@@ -15,7 +15,13 @@
 //! runtime's pool); the UI sends them one at a time, in call order, and each only takes the MIDI lock
 //! briefly (the bindings are written on the port thread). Every argument is the least the call needs: an
 //! epoch and items, a page's age, an action id and a track, a list revision and an index, a present
-//! port's id, the legacy list's text.
+//! port's id, the legacy list's text, a flag.
+//!
+//! `midi_subscribe_chain` is DEV only (registered as the `chain_*` commands are, `src-tauri/AGENTS.md`
+//! § Release IPC surface): `midi_subscribe` for a page that runs chain mode, set in the same locked step
+//! as its epoch, so an IN FX pedal switches the units of its kind (`docs/unit-contract.md` § 6) instead
+//! of the legacy send; a plain `midi_subscribe` sets legacy mode. A release build has no such command
+//! and its pedals run the send.
 
 use tauri::ipc::Channel;
 
@@ -85,6 +91,19 @@ pub fn input_send(epoch: u64, items: Vec<InputItem>) -> Result<Option<Dropped>, 
 pub fn midi_subscribe(channel: Channel<MidiEvent>, origin: f64) -> Result<u64, String> {
     midi(|midi| {
         midi.subscribe(origin, Box::new(move |event| {
+            // A closed page's channel fails until the next subscriber replaces it.
+            let _ = channel.send(event);
+        }))
+    })
+}
+
+/// DEV: `midi_subscribe` for a page that runs chain mode (`lf.chainNative`): its epoch runs the IN FX
+/// pedals on the units of their kind, from the same locked step on. Synchronous, as `midi_subscribe`.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub fn midi_subscribe_chain(channel: Channel<MidiEvent>, origin: f64) -> Result<u64, String> {
+    midi(|midi| {
+        midi.subscribe_chain(origin, Box::new(move |event| {
             // A closed page's channel fails until the next subscriber replaces it.
             let _ = channel.send(event);
         }))

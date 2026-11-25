@@ -1126,9 +1126,11 @@ impl Chains {
     }
 
     /// On shutdown, while the device still plays: atomically mark closing under the registry locks
-    /// (so no add can slip past the snapshot), sweep finished entries, send `remove_unit` for every
+    /// (so no add can slip past the snapshot), sweep finished entries, send a removal for every
     /// registered or in-flight non-legacy chain unit, and wait for all of them under one 2 s deadline
-    /// (held ops return at once with the host closing).
+    /// (held ops return at once with the host closing). Each removal is the shutdown's
+    /// (`EngineHost::remove_unit_at_shutdown`): a plugin unit keeps `unit-<id>.tone` for the next
+    /// launch's restore under its id, and the slot's file stays as it was.
     pub(super) fn unload_all(&self, host: &EngineHost) {
         host.set_closing();
         let mut ids = BTreeSet::new();
@@ -1151,7 +1153,7 @@ impl Chains {
         }
         let mut ops = Vec::new();
         for id in ids {
-            match host.remove_unit(id) {
+            match host.remove_unit_at_shutdown(id) {
                 Ok(Removal::Plate) => {}
                 Ok(Removal::Sent(op)) => ops.push((id, op)),
                 Err(why) => log::warn!("[chain_cmds] shutdown remove unit {id}: {why}"),

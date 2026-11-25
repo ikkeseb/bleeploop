@@ -3145,3 +3145,62 @@ fn p4f3_f_builtin_shutdown_does_not_abandon_removed_echo() {
         "removed built-in ECHO box must be collected and dropped during shutdown, never abandoned/leaked"
     );
 }
+
+/// E3f (`docs/unit-contract.md` § 1, § 6): the host's shutdown (`unload_all`) removes every unit but keeps
+/// a plugin unit's own tone, `unit-<id>.tone`, where it is, so the next launch's restore under that id
+/// finds it, and leaves the slot's file of that plugin as it was: two instances of one plugin in one slot
+/// each keep their own. A player's removal before shutdown still retires: its unit file becomes the
+/// slot's file.
+#[test]
+fn e3f_shutdown_keeps_a_plugin_units_tone_and_a_players_removal_retires_it() {
+    use crate::host::tone::decode as decode_tone;
+    use crate::host::unit_owner::test_support::{spawn_fake_unit, FakePluginConfig};
+
+    let host = start_fake_driver_host();
+    let doc_state = PluginHostState::default();
+    let epoch = doc_state.begin_frontend_session();
+    let slots = empty_slots();
+    let chains = Chains::new();
+    let (store, dir) = temp_tone_store("e3f-shutdown");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let amp = PluginRef { format: "clap".into(), path: "C:\\plugins\\KeepAmp.clap".into(), id: "keep.amp".into() };
+    let cab = PluginRef { format: "clap".into(), path: "C:\\plugins\\RetireCab.clap".into(), id: "retire.cab".into() };
+    // Each plugin's slot file as an earlier unit (or v0.8.9) left it.
+    let amp_slot = dir.join(amp.file_name(0));
+    let cab_slot = dir.join(cab.file_name(0));
+    let amp_before = make_tone_bytes(&amp, "KeepAmp", b"amp-slot-tone");
+    std::fs::write(&amp_slot, &amp_before).unwrap();
+    std::fs::write(&cab_slot, make_tone_bytes(&cab, "RetireCab", b"cab-slot-tone")).unwrap();
+
+    let open = |_fmt: PluginFormat, plugin: &PluginRef, unit_host: UnitHost, sink: EventSink, tone: Option<ToneBinding>| {
+        let state_bytes = format!("{}-{}-dialed-in", plugin.id, unit_host.id()).into_bytes();
+        spawn_fake_unit(unit_host, sink, tone, FakePluginConfig { name: plugin.id.clone(), state_bytes, ..Default::default() })
+    };
+    for (id, plugin, at) in [(801, &cab, 0), (802, &amp, 1), (803, &amp, 2)] {
+        let spec = UnitSpec { kind: UnitKind::Plugin, plugin: Some(plugin.clone()), params: None, bypass: false };
+        assert_eq!(chains.add(&host, (&doc_state, epoch), &slots, Some(&store), 0, id, spec, at, None, noop_sink(), &open), Ok(Added::Seated));
+        // The unit's first save lands in its own file (its load read the slot's, read only).
+        assert!(chains.tone_take(&host, (&doc_state, epoch), id).is_ok());
+        assert!(dir.join(format!("unit-{id}.tone")).exists(), "unit {id} saved its own tone");
+    }
+    assert_eq!(std::fs::read(&amp_slot).unwrap(), amp_before, "a unit's save leaves the slot file alone");
+
+    // The player removes the cab: its tone retires into the slot's file.
+    assert_eq!(chains.remove(&host, (&doc_state, epoch), 801), Ok(()));
+    wait_until(PATIENCE, "the removed unit's tone retires", || !dir.join("unit-801.tone").exists());
+    let retired = decode_tone(&std::fs::read(&cab_slot).unwrap()).unwrap();
+    assert_eq!(retired.state, b"retire.cab-801-dialed-in", "a player's removal retires the unit's tone into the slot file");
+
+    // The shutdown removes both amps: each one's own tone stays where it is, the slot file as it was.
+    chains.unload_all(&host);
+    host.shutdown();
+    chains.join_all();
+    assert_eq!(chains.active_entries(), 0, "every owner has ended");
+    for id in [802, 803] {
+        let kept = std::fs::read(dir.join(format!("unit-{id}.tone"))).unwrap_or_else(|e| panic!("the shutdown keeps unit-{id}.tone: {e}"));
+        assert_eq!(decode_tone(&kept).unwrap().state, format!("keep.amp-{id}-dialed-in").into_bytes());
+    }
+    assert_eq!(std::fs::read(&amp_slot).unwrap(), amp_before, "the shutdown leaves the slot file unchanged");
+    let _ = std::fs::remove_dir_all(&dir);
+}

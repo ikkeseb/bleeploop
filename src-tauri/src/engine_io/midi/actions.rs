@@ -6,9 +6,13 @@
 //!   (`Command::Action`, never the UI's copy of the selection), or `Command::ActionOn` a named lane. A
 //!   named REC/DUB selects its lane first (`SelectTrack`, as `looper.selectTrack(target)` does), so the
 //!   transport keys follow the take; another named action leaves the selection alone. HALVE is `Halve`.
-//! - **NEXT/PREV TRACK, PLAY ALL, STOP ALL, FADE, the eight toggles and the tuner are the engine's own
+//! - **NEXT/PREV TRACK, PLAY ALL, STOP ALL, FADE, the nine toggles and the tuner are the engine's own
 //!   actions.** A toggle and the tuner's press are looper presses themselves (each disarms a pending
 //!   CLEAR), so they go with no `Press`. A tuner pedal latches: one press on, the next off.
+//! - **An IN FX pedal follows the page's mode** (`MidiHost::subscribe_chain`, DEV only): in chain mode
+//!   `Toggle::Units` of its kind (every seated unit of that built-in effect, `docs/unit-contract.md`
+//!   § 6), else the legacy send's `Toggle::Send`, as before chains. A release build never sets chain
+//!   mode, so its pedals run the send; the legacy arm goes when chains reach players.
 //! - **GO LIVE and TAP stay the UI's:** a `Press` tells the engine a looper press came, and the UI runs
 //!   the action on its event. The stage view and its next look are no looper presses: an event only,
 //!   nothing for the engine, so a pending CLEAR and a lane cue outlive them.
@@ -21,7 +25,7 @@
 //! engine, and the events go to the UI either way, as a click's `onPress` and facade call run whatever
 //! the engine does with the press.
 
-use lf_engine::{Action, Command, InputSend, Toggle};
+use lf_engine::{Action, Command, InputSend, Toggle, UnitKind};
 #[cfg(debug_assertions)]
 use lf_engine::UnitParam;
 
@@ -55,8 +59,10 @@ fn lane(action: ActionId) -> Option<Action> {
     })
 }
 
-/// A global action the engine runs as its own (`ENGINE_GLOBAL`).
-fn engine_global(action: ActionId) -> Option<Action> {
+/// A global action the engine runs as its own (`ENGINE_GLOBAL`); an IN FX pedal on the units of its
+/// kind in `chains` mode, on the legacy send otherwise.
+fn engine_global(action: ActionId, chains: bool) -> Option<Action> {
+    let fx = |send: InputSend, kind: UnitKind| Action::Toggle(if chains { Toggle::Units(kind) } else { Toggle::Send(send) });
     Some(match action {
         ActionId::NextTrack => Action::NextTrack,
         ActionId::PrevTrack => Action::PrevTrack,
@@ -68,10 +74,10 @@ fn engine_global(action: ActionId) -> Option<Action> {
         ActionId::FixedToggle => Action::Toggle(Toggle::Fixed),
         ActionId::RetakeToggle => Action::Toggle(Toggle::Retake),
         ActionId::AutoRecToggle => Action::Toggle(Toggle::AutoRec),
-        ActionId::InFxEcho => Action::Toggle(Toggle::Send(InputSend::Echo)),
-        ActionId::InFxReverb => Action::Toggle(Toggle::Send(InputSend::Reverb)),
-        ActionId::InFxRing => Action::Toggle(Toggle::Send(InputSend::Ring)),
-        ActionId::InFxOtt => Action::Toggle(Toggle::Send(InputSend::Ott)),
+        ActionId::InFxEcho => fx(InputSend::Echo, UnitKind::Echo),
+        ActionId::InFxReverb => fx(InputSend::Reverb, UnitKind::Reverb),
+        ActionId::InFxRing => fx(InputSend::Ring, UnitKind::Ring),
+        ActionId::InFxOtt => fx(InputSend::Ott, UnitKind::Ott),
         ActionId::TunerToggle => Action::Tuner,
         _ => return None,
     })
@@ -96,8 +102,9 @@ fn on(target: Option<u8>, action: Action) -> Command {
     }
 }
 
-/// What `fire` runs: `runAction`, `pressHold` or `releaseHold`.
-pub(crate) fn run(fire: Fire) -> Run {
+/// What `fire` runs: `runAction`, `pressHold` or `releaseHold`; `chains`: the page runs chain mode (an
+/// IN FX pedal switches the units of its kind).
+pub(crate) fn run(fire: Fire, chains: bool) -> Run {
     let commands: Vec<Command>;
     let mut events = Vec::new();
     match fire {
@@ -108,7 +115,7 @@ pub(crate) fn run(fire: Fire) -> Run {
                     Some(i) if action == ActionId::RecDub => vec![Command::SelectTrack(i), on(target, a)],
                     _ => vec![on(target, a)],
                 };
-            } else if let Some(a) = engine_global(action) {
+            } else if let Some(a) = engine_global(action, chains) {
                 events.push(MidiEvent::Pressed);
                 commands = vec![Command::Action(a)];
             } else if let Some((ui, press)) = ui_action(action) {
@@ -283,7 +290,7 @@ mod tests {
         ];
         let mut covered: Vec<ActionId> = Vec::new();
         for (fire, want, events) in rows {
-            let got = run(fire);
+            let got = run(fire, false);
             assert_eq!((commands(&got), got.events), (want, events), "{fire:?}");
             if let Fire::Run { action, .. } = fire {
                 if !covered.contains(&action) {
@@ -294,11 +301,33 @@ mod tests {
         assert_eq!(covered, ActionId::ALL, "every action has its row, in the picker's order");
     }
 
+    // Chain mode (`docs/unit-contract.md` § 6): each IN FX pedal is the units of its kind, alone (no
+    // legacy send beside it), still a looper press; every other row runs as in legacy mode.
+    #[test]
+    fn in_chain_mode_an_in_fx_pedal_switches_the_units_of_its_kind() {
+        use ActionId::*;
+        let units = [(InFxEcho, UnitKind::Echo), (InFxReverb, UnitKind::Reverb), (InFxRing, UnitKind::Ring), (InFxOtt, UnitKind::Ott)];
+        for (action, kind) in units {
+            let got = run(Fire::Run { action, target: None }, true);
+            assert_eq!(commands(&got), [Command::Action(Action::Toggle(Toggle::Units(kind)))], "{action:?}");
+            assert_eq!(got.events, [MidiEvent::Pressed], "{action:?}");
+        }
+        for action in ActionId::ALL.into_iter().filter(|a| !units.iter().any(|(u, _)| u == a)) {
+            for target in [None, Some(2)] {
+                let fire = Fire::Run { action, target };
+                assert_eq!(run(fire, true), run(fire, false), "{fire:?}");
+            }
+        }
+        for fire in [Fire::HoldPress { target: Some(4), control: 3 }, Fire::HoldRelease { control: 3 }] {
+            assert_eq!(run(fire, true), run(fire, false), "{fire:?}");
+        }
+    }
+
     // The queue's classes: a toggle is a fresh action, HOLD's press reserves its release, its release
     // is a release; one fire is one batch.
     #[test]
     fn hold_goes_to_the_queue_as_a_press_and_its_release() {
-        let classes = |fire: Fire| run(fire).out.iter().map(|o| o.class).collect::<Vec<_>>();
+        let classes = |fire: Fire| run(fire, false).out.iter().map(|o| o.class).collect::<Vec<_>>();
         assert_eq!(classes(Fire::HoldPress { target: Some(1), control: 0 }), [Class::Action, Class::HoldPress]);
         assert_eq!(classes(Fire::HoldRelease { control: 0 }), [Class::HoldRelease]);
         assert_eq!(classes(Fire::Run { action: ActionId::ClickToggle, target: None }), [Class::Action]);
