@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use lf_engine::dsp::fx::{FxKind, FxParam};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, InputSend, LaneState, SlotEvent, TimedCommand, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor, SLOT_COUNT, TRACK_COUNT};
+use lf_engine::{max_chain_latency, Command, InputSend, LaneState, ProcessContext, SeatRefusal, SlotEvent, TimedCommand, UnitCx, UnitId, UnitInfo, UnitKind, UnitProcessor, SLOT_COUNT, TRACK_COUNT};
 use lf_rig::{AddFail, AddOk, AddState, Place, PluginRecord, PluginRefView, Retry, RigRecord, RigStatus, UnitBody, UnitRecord, SAVE_QUIET};
 
 use super::host::{AppHost, Loader};
@@ -23,7 +23,7 @@ use crate::engine_io::chain_cmds::tests::{empty_slots, ClampingBuiltinFactory};
 use crate::engine_io::chain_cmds::Chains;
 use crate::engine_io::plugins::EngineSlot;
 use crate::engine_io::test_rig::{TestDevice, PATIENCE};
-use crate::engine_io::unit_host::{Activated, Back, BuiltinFactory, OpState, Params, Removal, Spec, Terms, Unit, UnitHost};
+use crate::engine_io::unit_host::{Activated, Back, BuiltinFactory, OpState, Params, Removal, Spec, Terms, Unit, UnitHost, BEFORE_RESERVE_STATE};
 use crate::engine_io::EngineHost;
 use crate::host::engine_slot::{EventSink, PluginFormat};
 use crate::host::tone::{ToneBinding, ToneIdentity, ToneStore};
@@ -183,14 +183,29 @@ fn send(host: &EngineHost, command: Command) {
     host.send(TimedCommand { frame: None, command }).expect("the ring takes it");
 }
 
-/// A pass-through plugin stand-in, an instrument (a source) when `source`.
+/// Render one 256-frame block at device frame `frame` on this thread, as the device's callback does:
+/// for a stopped test device whose `running` the test raised, so nothing else renders a block or
+/// services a port.
+fn render_block(host: &EngineHost, frame: Frame) {
+    let (x, mut l, mut r) = (vec![0.0f32; 256], vec![0.0f32; 256], vec![0.0f32; 256]);
+    let entry = Instant::now();
+    {
+        let mut rt = host.core.rt.lock().unwrap();
+        let engine = rt.engine.as_mut().expect("an engine");
+        engine.process(&ProcessContext { frame, xrun: false, damaged: false, align_frames: 0, input_frames: 0 }, &x, &mut l, &mut r);
+    }
+    host.core.clock.publish(entry, frame, 256, host.core.rate.load(Relaxed));
+}
+
+/// A pass-through plugin stand-in, an instrument (a source) when `source`, reporting `latency`.
 struct Thru {
     source: bool,
+    latency: Frame,
 }
 
 impl UnitProcessor for Thru {
     fn info(&self) -> UnitInfo {
-        UnitInfo { kind: UnitKind::Plugin, source: self.source, latency: 0 as Frame }
+        UnitInfo { kind: UnitKind::Plugin, source: self.source, latency: self.latency }
     }
     fn process(&mut self, _cx: &UnitCx, input: [&[f32]; 2], _events: &[SlotEvent], out: [&mut [f32]; 2]) {
         for (o, i) in out.into_iter().zip(input) {
@@ -336,7 +351,7 @@ fn restore_never_replaces_a_source_awaiting_its_reseat() {
     let player = host.unit(0, 9, Spec::Plugin(plugin_ref("player")), 0, false).expect("reserve the player's source");
     player.activated(Activated { name: "player".into(), source: true, latency: 0 });
     let terms = player.terms().expect("engine terms");
-    let op = player.submit(Box::new(Thru { source: true }), terms).map_err(|(_, e)| e).expect("submit");
+    let op = player.submit(Box::new(Thru { source: true, latency: 0 }), terms).map_err(|(_, e)| e).expect("submit");
     assert_eq!(host.wait_op(op, PATIENCE), Ok(OpState::Applied));
     b.device.rebuild_at(44_100, 256);
     {
@@ -356,6 +371,63 @@ fn restore_never_replaces_a_source_awaiting_its_reseat() {
     let op = player.submit(unit, terms).map_err(|(_, e)| e).expect("reseat");
     assert_eq!(host.wait_op(op, PATIENCE), Ok(OpState::Applied));
     assert!(b.applied(9), "the player's source reseats");
+}
+
+/// The player's source, back from a rebuild, re-activated as an effect with a latency past the most a
+/// slot compensates, queues its reseat in that role: the projection shows an effect at the head, and
+/// its row has an op queued. It keeps the source role until an install in another role applies, so a
+/// restore SYNTH added meanwhile is `SourceTaken`. The engine refuses the reseat (`Latency`) and the
+/// player's source keeps its plate: had the SYNTH queued behind the reseat, it would have applied at
+/// the head and taken the source out as replaced (`Model::take_older_sources_out_of_engine`). Once
+/// its reseat as an effect applies, it is no source: a restore SYNTH heads the slot ahead of it.
+#[test]
+fn restore_never_replaces_a_source_whose_reseat_as_an_effect_is_refused() {
+    let mut b = Bench::new(fast_device());
+    let host = b.host().clone();
+    let player = host.unit(0, 9, Spec::Plugin(plugin_ref("player")), 0, false).expect("reserve the player's source");
+    player.activated(Activated { name: "player".into(), source: true, latency: 0 });
+    let terms = player.terms().expect("engine terms");
+    let op = player.submit(Box::new(Thru { source: true, latency: 0 }), terms).map_err(|(_, e)| e).expect("submit");
+    assert_eq!(host.wait_op(op, PATIENCE), Ok(OpState::Applied));
+    b.device.stop();
+    b.device.rebuild_at(48_000, 256);
+    {
+        // As a running device: what is pushed waits in its port until the device resumes.
+        let _rt = host.core.rt.lock().unwrap();
+        host.core.running.store(true, Release);
+    }
+    let Some(Back::Evicted { .. }) = player.take_back() else { panic!("the rebuild handed the player's source back") };
+    let past = max_chain_latency(48_000) + 1;
+    player.activated(Activated { name: "player".into(), source: false, latency: past });
+    let terms = player.terms().expect("the new engine's terms");
+    let reseat = player.submit(Box::new(Thru { source: false, latency: past }), terms).map_err(|(_, e)| e).expect("reseat as an effect");
+    {
+        let state = host.core.state.lock().unwrap();
+        assert!(state.model.has_pending_install(0, 9), "its reseat is queued");
+        assert_eq!(state.model.head_source_id(0, None), None, "the projection shows an effect at the head");
+    }
+    let app = b.app.clone();
+    let adding = std::thread::spawn(move || app.add(0, 7, &builtin(7, UnitKind::Synth), &Place::After(vec![])));
+    wait_until("the restore's SYNTH is answered or queued behind the reseat", || {
+        adding.is_finished() || host.core.state.lock().unwrap().model.has_pending_install(0, 7)
+    });
+    b.device.resume();
+    match adding.join().expect("the add's thread") {
+        Err(AddFail::SourceTaken { .. }) => {}
+        other => panic!("a restore SYNTH while the player's source reseats as an effect: expected SourceTaken, got {other:?}"),
+    }
+    assert_eq!(host.wait_op(reseat, PATIENCE), Ok(OpState::Refused(SeatRefusal::Latency)), "the engine refuses the reseat");
+    assert!(b.ids(0).contains(&9), "the player's source keeps its plate");
+    assert!(!b.applied(7), "the restore's SYNTH never applied");
+
+    let Some(Back::Refused { .. }) = player.take_back() else { panic!("the refused reseat's unit came back") };
+    player.activated(Activated { name: "player".into(), source: false, latency: 0 });
+    let terms = player.terms().expect("engine terms");
+    let op = player.submit(Box::new(Thru { source: false, latency: 0 }), terms).map_err(|(_, e)| e).expect("reseat as an effect");
+    assert_eq!(host.wait_op(op, PATIENCE), Ok(OpState::Applied));
+    seated(b.app.add(0, 7, &builtin(7, UnitKind::Synth), &Place::After(vec![])));
+    assert_eq!(b.ids(0).first(), Some(&7), "the restore's SYNTH heads the slot");
+    assert!(b.applied(7) && b.applied(9), "the player's unit, an effect now, stays behind it");
 }
 
 // ── the seed and its barrier (D1, D2) ────────────────────────────────────────────────────────────────
@@ -458,11 +530,12 @@ fn barrier_retargets_on_rebuild() {
 /// the settings memory's (each lane's mix off its defaults, which the old engine applied), more than
 /// 64 commands. The barrier sees it: `Pending` after that block, `Taken` later. So the restore
 /// re-checks the barrier before each add, and an install already queued across a rebuild is the
-/// residual window (`OPEN-THREADS.md`). The block count is read before the device resumes, and the
-/// first block's reads are made before the second (300 ms later) renders.
+/// residual window (`OPEN-THREADS.md`). The device stays stopped after the rebuild and the test renders
+/// the new engine's blocks itself, one at a time ([`render_block`]): the first block's reads are made
+/// before any second block renders.
 #[test]
 fn first_block_can_seat_an_install_ahead_of_a_long_replay() {
-    let mut b = Bench::new(TestDevice::start(48_000, 256, Duration::from_millis(300), |_| 0.0));
+    let mut b = Bench::new(fast_device());
     let host = b.host().clone();
     let mut long = Vec::new();
     for lane in 0..TRACK_COUNT as u8 {
@@ -488,21 +561,30 @@ fn first_block_can_seat_an_install_ahead_of_a_long_replay() {
     let uh = host.unit(0, 1, Spec::Plugin(plugin_ref("ahead")), 0, false).expect("reserve");
     uh.activated(Activated { name: "ahead".into(), source: false, latency: 0 });
     {
-        // As a running device: the install waits in the port for a block (no idle service).
+        // As a running device whose blocks this test renders: the install waits in the port for a
+        // block (no idle service).
         let _rt = host.core.rt.lock().unwrap();
         host.core.running.store(true, Release);
     }
     let terms = uh.terms().expect("engine terms");
-    let op = uh.submit(Box::new(Thru { source: false }), terms).map_err(|(_, e)| e).expect("submit");
-    let first = b.device.blocks.load(Relaxed) + 1;
-    b.device.resume();
-    assert!(b.device.wait_block_count(first), "the first block renders");
+    let op = uh.submit(Box::new(Thru { source: false, latency: 0 }), terms).map_err(|(_, e)| e).expect("submit");
+    // The stopped device's next frame: each of its blocks moved the frame by 256 from 0.
+    let mut frame = b.device.blocks.load(Relaxed) as Frame * 256;
+    render_block(&host, frame);
     assert_eq!(b.app.wait_taken(Duration::ZERO), SeedTaken::Pending, "the seed is still in the ring after the first block");
-    settle(&host);
     assert!(b.applied(1), "the install seated in the first block, ahead of the seed");
-    assert_eq!(b.device.blocks.load(Relaxed), first, "both read within the first block");
+    let mut rendered = 1;
+    while !matches!(b.app.wait_taken(Duration::ZERO), SeedTaken::Taken { .. }) {
+        assert!(rendered < 8, "the replay and the seed are taken within a few blocks");
+        frame += 256;
+        render_block(&host, frame);
+        rendered += 1;
+    }
+    assert!(rendered > 1, "the seed took a later block than the install");
     assert_eq!(host.wait_op(op, PATIENCE), Ok(OpState::Applied));
-    assert!(matches!(b.app.wait_taken(PATIENCE), SeedTaken::Taken { .. }));
+    // As the device's stop: the bench's teardown services the ports idle.
+    host.core.running.store(false, Release);
+    host.core.clock.clear();
 }
 
 // ── forget and closing ───────────────────────────────────────────────────────────────────────────────
@@ -569,21 +651,18 @@ fn add_refused_before_the_mint_without_a_device_and_once_closing() {
     assert!(b.ids(0).is_empty(), "no plate");
 }
 
-/// The shutdown marks the host closing while an add waits for `state` in its reservation (past its
-/// first closing checks, its plugin slots' lock held: `Chains::mint`): the add reserves nothing
-/// (`Host`, no token, no plate), so no unit escapes the shutdown's removal of the units it sees.
+/// The shutdown marks the host closing while an add is on its way to `state` for its reservation (past
+/// its first closing checks, its plugin slots' lock held: `Chains::mint`): the add reserves nothing
+/// (`Host`, no token, no plate), so no unit escapes the shutdown's removal of the units it sees. The
+/// host closes at the reservation's last step before the lock (`BEFORE_RESERVE_STATE`), so a closing
+/// read made anywhere ahead of the lock misses it.
 #[test]
 fn add_waiting_on_state_as_the_host_closes_reserves_nothing() {
     let b = Bench::new(fast_device());
-    let app = b.app.clone();
-    let state = b.host().core.state.lock().unwrap();
-    let adding = std::thread::spawn(move || app.add(0, 3, &builtin(3, UnitKind::Echo), &Place::End));
-    wait_until("the add is in its reservation", || b.slots.try_lock().is_err());
-    // From the slots' lock to `state` is a few reads: give it ample time to block there.
-    std::thread::sleep(Duration::from_millis(50));
-    b.host().set_closing();
-    drop(state);
-    let added = adding.join().expect("the add's thread");
+    let host = b.host().clone();
+    BEFORE_RESERVE_STATE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || host.set_closing())));
+    let added = b.app.add(0, 3, &builtin(3, UnitKind::Echo), &Place::End);
+    assert!(BEFORE_RESERVE_STATE.with(|hook| hook.borrow().is_none()), "the reservation reached its lock");
     assert_eq!(host_refusal(added), (Retry::Launch, None), "refused with no token");
     assert!(b.ids(0).is_empty(), "no plate");
 }

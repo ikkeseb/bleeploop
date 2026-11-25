@@ -9,7 +9,8 @@
 //!   moves the generation (the new engine's replay carries the seed).
 //! - **The add (D5, D9):** `Chains::add_as_host`, the player's typed add at a [`Place`] (resolved under
 //!   the slot's order lock and `state`), with a match before the mint and no replacement of the
-//!   player's source (the slot's head, or one awaiting its reseat after a rebuild). Refused before the
+//!   player's source (the slot's head, or one that keeps the role until an install in another role
+//!   applies: its seat out after a rebuild, or a reseat as an effect only queued). Refused before the
 //!   mint (`Host`, no token) once the host is closing (`Retry::Launch`; read again under `state` at the
 //!   reservation, so an add that passed the first check as the shutdown began reserves nothing) and
 //!   while no device runs (`Retry::Device`), so no failed plate shows for it.
@@ -18,9 +19,11 @@
 //!   it answers, so a token the restore follows and the host does not know names no attempt an owner
 //!   ran for.
 //! - **The forget:** `Chains::forget_files` in the tone store's folder, under the chain host's id
-//!   reservation lock (`id_guard`), never a slot's order lock. `Deleted` only when no file of the id is
-//!   left: a delete that fails for any reason but not-found (a sharing violation, a denied access)
-//!   answers `Held`, so the driver asks again at its next turn, as for a unit that holds the id.
+//!   reservation lock (`id_guard`), never a slot's order lock. [`Forgot::Held`] means a unit holds the
+//!   id, or a file is left (the other may be gone): a delete that fails for any reason but not-found (a
+//!   sharing violation, a denied access) answers `Held`, so the driver asks again at its next turn.
+//!   `Deleted` only when no file of the id is left. A file left is logged once, again only once it
+//!   went or its error kind changed, not at every turn's ask.
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering::Acquire;

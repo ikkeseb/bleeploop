@@ -1050,10 +1050,8 @@ impl Model {
 
     /// The older sources of `slot` that source `unit`'s install would take out when it applies at the
     /// head ([`Self::take_older_sources_out_of_engine`]): each one's row live, its seat out of this
-    /// engine (a rebuild's eviction it has not reseated from, or parked) and no op of its queued. A host
-    /// add judges its install by it too (D9: it never replaces a source, also one awaiting its reseat,
-    /// which no projected seat shows: `head_source_id`).
-    pub(crate) fn older_sources_out_of_engine(&self, slot: usize, unit: UnitId, table: &Table) -> Vec<UnitId> {
+    /// engine (a rebuild's eviction it has not reseated from, or parked) and no op of its queued.
+    fn older_sources_out_of_engine(&self, slot: usize, unit: UnitId, table: &Table) -> Vec<UnitId> {
         let sm = &self.slots[slot];
         let Some(rev) = sm.find(unit).map(|i| sm.plates[i].added_rev) else { return Vec::new() };
         sm.plates
@@ -1070,6 +1068,24 @@ impl Model {
             })
             .map(|p| p.id)
             .collect()
+    }
+
+    /// Whether a plate of `slot` other than `unit` still holds the slot's source role, as a host add's
+    /// first install must leave it (D9, `UnitHost::submit`): its row live, not leaving, and a source by
+    /// the role its last applied install seated it in (`seated_source`; its reported role if it never
+    /// applied). It keeps that role until an install in another role applies or it leaves, whatever is
+    /// queued for it meanwhile and wherever its seat is: a reseat as an effect the engine may still
+    /// refuse (for its latency, say), a rebuild's eviction it has not reseated from, a park. No
+    /// projected seat need show it (`head_source_id` projects the reported role), and a source install
+    /// applying while it stands takes it out ([`Self::take_older_sources_out_of_engine`]).
+    pub(crate) fn source_role_held(&self, slot: usize, unit: UnitId, table: &Table) -> bool {
+        self.slots[slot].plates.iter().any(|p| {
+            p.id != unit
+                && !p.legacy
+                && p.state != PlateState::Leaving
+                && p.seated_source.unwrap_or(p.source)
+                && table.has_active_row(p.id)
+        })
     }
 
     /// Project an `Event::Chain` (or a snapshot read off `Engine::chain`) into the model.

@@ -390,6 +390,9 @@ pub(crate) struct Chains {
     /// The exit latch of every load attempt an add minted, by its install token, registered at the
     /// mint (`exited`) and kept once set (one entry per add). A leaf lock.
     exits: Mutex<BTreeMap<InstallToken, ExitLatch>>,
+    /// The error kind last logged for each tone file a forget left (`forget_files`): the restore asks
+    /// again each turn, so a lasting failure is logged once per kind, not every ~100 ms. A leaf lock.
+    forget_left: Mutex<BTreeMap<String, std::io::ErrorKind>>,
     closing: AtomicBool,
     #[cfg(test)]
     fail_next_spawn: AtomicBool,
@@ -435,6 +438,7 @@ impl Chains {
             affinity: Mutex::new(Affinity::default()),
             tokens: Mutex::new(ToneTokens::default()),
             exits: Mutex::new(BTreeMap::new()),
+            forget_left: Mutex::new(BTreeMap::new()),
             closing: AtomicBool::new(false),
             #[cfg(test)]
             fail_next_spawn: AtomicBool::new(false),
@@ -845,7 +849,9 @@ impl Chains {
     /// unit removal takes after it marks the host closing (`Self::unload_all`): either no unit held the
     /// id before the shutdown began, and none can take it while `id_guard` is held here, so the shutdown
     /// keeps no file of this id; or closing reads true. `Held` too when a file is left (any failure but
-    /// not found: a sharing violation, a denied access), logged: the restore asks again at a later turn.
+    /// not found: a sharing violation, a denied access): the restore asks again at a later turn. A file
+    /// left is logged once per error kind (`forget_left`), and again only after it went or its error
+    /// changed.
     pub(crate) fn forget_files(&self, host: &EngineHost, id: UnitId, tones_dir: Option<&std::path::Path>) -> Forgot {
         let _id_guard = self.id_guard.lock().unwrap_or_else(|e| e.into_inner());
         {
@@ -860,12 +866,21 @@ impl Chains {
         let mut left = false;
         if let Some(dir) = tones_dir {
             for name in [crate::host::tone::ToneIdentity::unit_file_name(id), crate::host::tone::ToneIdentity::unit_pin_name(id)] {
-                match std::fs::remove_file(dir.join(&name)) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => {
-                        log::warn!("[chain_cmds] unit {id}: the forgotten unit's {name} was not deleted ({e}); tried again later");
+                let failed = match std::fs::remove_file(dir.join(&name)) {
+                    Ok(()) => None,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => Some(e),
+                };
+                let mut logged = self.forget_left.lock().unwrap_or_else(|e| e.into_inner());
+                match failed {
+                    None => {
+                        logged.remove(&name);
+                    }
+                    Some(e) => {
                         left = true;
+                        if logged.insert(name.clone(), e.kind()) != Some(e.kind()) {
+                            log::warn!("[chain_cmds] unit {id}: the forgotten unit's {name} was not deleted ({e}); tried again later, logged once");
+                        }
                     }
                 }
             }
