@@ -359,10 +359,12 @@ fn submit_owed<P: OwnedPlugin>(
     }
 }
 
-/// End before the unit ever applied a seat: release the plugin and its unit (if held), delete the
-/// files its add wrote (`undo_add`: the failed plate's removal has no owner left to retire them), fail
-/// the plate, release the reservation, and then answer `Err(why)` so a caller that sees `Err` finds the
-/// plugin already gone.
+/// End before the unit ever applied a seat: delete the files its add wrote (`undo_add`: the failed
+/// plate's removal has no owner left to retire them) while the id is still reserved, fail the plate
+/// (which frees the id), release the plugin and its unit (if held), release the reservation, and then
+/// answer `Err(why)` so a caller that sees `Err` finds the plugin already gone. The id is free before
+/// `plugin.release()`, which may block in foreign code: a same-id add never waits on this owner's
+/// teardown (the plugin's path affinity stays held until the owner thread ends).
 #[allow(clippy::too_many_arguments)]
 fn fail_before_seat<P: OwnedPlugin>(
     host: UnitHost,
@@ -379,10 +381,10 @@ fn fail_before_seat<P: OwnedPlugin>(
     if plugin.editor() != Editor::Closed {
         plugin.editor_close();
     }
-    plugin.release(unit);
     undo_add(add, tone);
-    report_faults(faults, slot, reported);
     host.failed(why.clone());
+    plugin.release(unit);
+    report_faults(faults, slot, reported);
     host.release();
     if let Some(tx) = ready.take() {
         let _ = tx.try_send(Err(why));
