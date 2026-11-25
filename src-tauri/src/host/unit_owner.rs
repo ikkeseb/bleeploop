@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use clack_host::entry::PluginEntry;
 use lf_engine::{SeatRefusal, UnitId, UnitProcessor};
+use lf_rig::Retry;
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::super::editor_window::{pump_thread_messages, wait_for_input};
@@ -37,6 +38,111 @@ use crate::engine_io::unit_host::{Activated, Back, Op, OpState, SubmitError, Ter
 /// Bound for a stopping owner to collect a unit box already on its way back from the engine before
 /// declaring it abandoned (matches production `REMOVE_TIMEOUT`).
 const STOP_RETURN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The answer of a load whose setup outlasted its wait before it claimed: the owner may still be in
+/// plugin code (its plugin file's editor affinity is leaked, `Chains`).
+pub(crate) const SETUP_TIMEOUT: &str = "plugin setup timed out";
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own bound for the two load waits ([`set_load_wait`]), read on the loading thread.
+    static LOAD_WAIT: std::cell::Cell<Duration> = const { std::cell::Cell::new(LOAD_TIMEOUT) };
+}
+
+/// How long a load waits for its owner's first answer, and once more after the owner claimed it.
+fn load_wait() -> Duration {
+    #[cfg(test)]
+    return LOAD_WAIT.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    LOAD_TIMEOUT
+}
+
+/// Test-only: this thread's loads wait `wait` in place of [`LOAD_TIMEOUT`] (a setup timeout and an
+/// unanswered add without 15 s waits).
+#[cfg(test)]
+pub(crate) fn set_load_wait(wait: Duration) {
+    LOAD_WAIT.with(|w| w.set(wait));
+}
+
+/// Whether a unit's owner thread has ended (D5, D6): set by the thread's last drop, after its plugin's
+/// release, so a set latch means no code of that load runs any more. An add answers with it and
+/// `Chains` keeps it per install token (`Chains::exited`); cloned freely, read from any thread.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ExitLatch(Arc<AtomicBool>);
+
+impl ExitLatch {
+    /// Unset: an owner is about to run ([`ExitLatch::guard`] goes to its thread).
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Already set: no owner ran.
+    pub(crate) fn ended() -> Self {
+        Self(Arc::new(AtomicBool::new(true)))
+    }
+
+    pub(crate) fn is_set(&self) -> bool {
+        self.0.load(Acquire)
+    }
+
+    /// The guard an owner thread holds first and drops last: its drop (a return or an unwind) sets the
+    /// latch. A thread that never starts drops it with its closure.
+    pub(crate) fn guard(&self) -> ExitGuard {
+        ExitGuard(self.clone())
+    }
+}
+
+/// Sets its [`ExitLatch`] when dropped.
+pub(crate) struct ExitGuard(ExitLatch);
+
+impl Drop for ExitGuard {
+    fn drop(&mut self) {
+        self.0 .0.store(true, Release);
+    }
+}
+
+/// Who refused a unit's add, by D5's classes (`lf_rig::AddFail`): what an owner answers with its `why`
+/// and `Chains` maps onto `AddFail` with the attempt's token and its owner's [`ExitLatch`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FailClass {
+    /// Refused before the plugin's code ran (no engine: [`Retry::Device`]); also a refusal after the
+    /// load whose owner had already ended at the answer (no engine, closing), so nothing is left to wait
+    /// for.
+    Host(Retry),
+    /// A source the player put in heads the slot (D9). No path answers it before CP3b's host-add rule
+    /// (`SubmitError::SourceTaken`, met in `submit_owed`).
+    #[allow(dead_code)] // CP3b's `SubmitError::SourceTaken` answers it
+    SourceTaken,
+    /// The engine or the host refused the seat after the unit was built (a seat refusal, a full port,
+    /// a replaced or removed unit).
+    Seat,
+    /// The unit's own setup or activation failed.
+    Plugin,
+    /// No answer to trust: the setup outlasted its wait before it claimed, and the owner may still be
+    /// in plugin code.
+    Unresolved,
+}
+
+/// A load that failed: its reason, its class, and its owner's exit latch (set unless the owner may
+/// still run, [`FailClass::Unresolved`]).
+#[derive(Clone, Debug)]
+pub(crate) struct LoadFail {
+    pub(crate) why: String,
+    pub(crate) class: FailClass,
+    pub(crate) exit: ExitLatch,
+}
+
+/// An opener that answers a plain reason (the tests' fakes, the CLAP fixture's) names no owner: a setup
+/// timeout reads [`FailClass::Unresolved`], anything else [`FailClass::Plugin`], the latch set.
+impl From<String> for LoadFail {
+    fn from(why: String) -> Self {
+        let class = if why == SETUP_TIMEOUT { FailClass::Unresolved } else { FailClass::Plugin };
+        LoadFail { why, class, exit: ExitLatch::ended() }
+    }
+}
+
+/// An owner's first answer: the install's, or its failure with its class.
+pub(crate) type First = Result<Answer, (FailClass, String)>;
 
 /// A chain unit's load place: its slot index and the engine terms read before loading.
 struct ChainPlace {
@@ -87,8 +193,8 @@ pub(super) struct UnitCtx {
     /// The main window's HWND (0 = none): a floating CLAP editor's transient parent.
     pub(super) editor_parent: usize,
     /// Capacity-1 reply channel (`ready_channel`): carries the install's first answer
-    /// (`Seated`/`Waiting`) or its error before seating without blocking the owner.
-    pub(super) ready: SyncSender<Result<Answer, String>>,
+    /// (`Seated`/`Waiting`) or its error and its class before seating without blocking the owner.
+    pub(super) ready: SyncSender<First>,
     /// The plugin's tone: restored at load, saved on edits/requests/teardown, retired on removal.
     pub(super) tone: ToneKeeper,
     /// Set once the plugin loads (before `claim`), so `UnitOwner::name` works even on `Unanswered`.
@@ -96,7 +202,7 @@ pub(super) struct UnitCtx {
 }
 
 /// Capacity-1 first-answer channel so the owner's `try_send` never blocks waiting on its caller.
-pub(super) fn ready_channel() -> (SyncSender<Result<Answer, String>>, Receiver<Result<Answer, String>>) {
+pub(super) fn ready_channel() -> (SyncSender<First>, Receiver<First>) {
     std::sync::mpsc::sync_channel(1)
 }
 
@@ -152,7 +258,7 @@ enum Exit<U> {
     /// `Back::Dismissed` arrived (the seat was removed while its box was out of the engine).
     Dismissed,
     /// Refused or fatally failed before ever seating.
-    FailedBeforeSeat { unit: Option<Box<U>>, why: String },
+    FailedBeforeSeat { unit: Option<Box<U>>, why: String, class: FailClass },
 }
 
 fn refusal_reason(why: SeatRefusal) -> String {
@@ -181,7 +287,7 @@ fn submit_error_reason(err: SubmitError) -> String {
     }
 }
 
-fn send_answer(ready: &mut Option<SyncSender<Result<Answer, String>>>, slot: usize, id: UnitId, answer: Answer) {
+fn send_answer(ready: &mut Option<SyncSender<First>>, slot: usize, id: UnitId, answer: Answer) {
     if let Some(tx) = ready.take() {
         if tx.try_send(Ok(answer)).is_err() {
             log::info!("[plugin_host] engine slot {slot} unit {id}: install answered after caller moved on; serving on");
@@ -292,6 +398,7 @@ fn submit_owed<P: OwnedPlugin>(
             return Some(Exit::FailedBeforeSeat {
                 unit: Some(unit),
                 why: "no audio device is open".to_string(),
+                class: FailClass::Host(Retry::Device),
             });
         }
         *seat = Seat::Owed { unit, activated_at };
@@ -312,7 +419,7 @@ fn submit_owed<P: OwnedPlugin>(
             }
             Err((returned, why)) => {
                 if !ever_seated {
-                    return Some(Exit::FailedBeforeSeat { unit: Some(returned), why });
+                    return Some(Exit::FailedBeforeSeat { unit: Some(returned), why, class: FailClass::Plugin });
                 }
                 log::warn!(
                     "[plugin_host] engine slot {} unit {}: reactivate failed ({why}); parking",
@@ -344,7 +451,7 @@ fn submit_owed<P: OwnedPlugin>(
             let returned = own(returned);
             let msg = refusal_reason(why);
             if !ever_seated {
-                return Some(Exit::FailedBeforeSeat { unit: Some(returned), why: msg });
+                return Some(Exit::FailedBeforeSeat { unit: Some(returned), why: msg, class: FailClass::Seat });
             }
             log::warn!(
                 "[plugin_host] engine slot {} unit {}: reseat refused ({msg}); parking",
@@ -365,6 +472,7 @@ fn submit_owed<P: OwnedPlugin>(
                 return Some(Exit::FailedBeforeSeat {
                     unit: Some(returned),
                     why: submit_error_reason(SubmitError::NoEngine),
+                    class: FailClass::Host(Retry::Device),
                 });
             }
             *seat = Seat::Owed { unit: returned, activated_at };
@@ -376,6 +484,7 @@ fn submit_owed<P: OwnedPlugin>(
                 return Some(Exit::FailedBeforeSeat {
                     unit: Some(returned),
                     why: submit_error_reason(SubmitError::Closing),
+                    class: FailClass::Host(Retry::Launch),
                 });
             }
             *seat = Seat::Closing { unit: returned };
@@ -387,6 +496,8 @@ fn submit_owed<P: OwnedPlugin>(
         }
         Err((returned, SubmitError::Superseded)) => Some(Exit::Returned { unit: own(returned), retire: false }),
         Err((returned, SubmitError::Replaced)) => Some(Exit::Returned { unit: own(returned), retire: true }),
+        // CP3b's `SubmitError::SourceTaken` (a host add never replaces, D9) ends here before a seat as
+        // `Exit::FailedBeforeSeat` with `FailClass::SourceTaken`.
     }
 }
 
@@ -404,7 +515,8 @@ fn fail_before_seat<P: OwnedPlugin>(
     tone: &mut ToneKeeper,
     add: bool,
     why: String,
-    ready: &mut Option<SyncSender<Result<Answer, String>>>,
+    class: FailClass,
+    ready: &mut Option<SyncSender<First>>,
     faults: &AtomicU32,
     reported: &mut u32,
 ) -> Result<(), String> {
@@ -418,7 +530,7 @@ fn fail_before_seat<P: OwnedPlugin>(
     report_faults(faults, slot, reported);
     host.release();
     if let Some(tx) = ready.take() {
-        let _ = tx.try_send(Err(why));
+        let _ = tx.try_send(Err((class, why)));
     }
     Ok(())
 }
@@ -590,7 +702,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
         host.failed(why.clone());
         host.release();
         if let Some(tx) = ready.take() {
-            let _ = tx.try_send(Err(why));
+            let _ = tx.try_send(Err((FailClass::Host(Retry::Device), why)));
         }
         return Ok(());
     };
@@ -612,7 +724,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             host.failed(e.clone());
             host.release();
             if let Some(tx) = ready.take() {
-                let _ = tx.try_send(Err(e));
+                let _ = tx.try_send(Err((FailClass::Plugin, e)));
             }
             return Ok(());
         }
@@ -631,6 +743,8 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             &mut tone,
             add,
             "plugin load cancelled".to_string(),
+            // Its caller answered `SETUP_TIMEOUT` already and reads nothing more.
+            FailClass::Unresolved,
             &mut ready,
             &faults,
             &mut reported,
@@ -662,7 +776,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
                         let unit = own(unit);
                         let msg = refusal_reason(why);
                         if !ever_seated {
-                            return Exit::FailedBeforeSeat { unit: Some(unit), why: msg };
+                            return Exit::FailedBeforeSeat { unit: Some(unit), why: msg, class: FailClass::Seat };
                         }
                         log::warn!("[plugin_host] engine slot {slot} unit {id}: reseat refused ({msg}); parking");
                         host.parked(msg);
@@ -788,14 +902,14 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
     }));
 
     match served {
-        Ok(Exit::FailedBeforeSeat { unit, why }) => {
-            fail_before_seat(host, plugin, unit, &mut tone, add, why, &mut ready, &faults, &mut reported)
+        Ok(Exit::FailedBeforeSeat { unit, why, class }) => {
+            fail_before_seat(host, plugin, unit, &mut tone, add, why, class, &mut ready, &faults, &mut reported)
         }
         Ok(Exit::Returned { unit, retire }) => {
             let end = tone_end(&host, add, retire);
             let res = ordered_release(host, plugin, Some(unit), &mut tone, &name, true, end, &faults, &mut reported);
             if let Some(tx) = ready.take() {
-                let _ = tx.try_send(Err("unit left before seating".to_string()));
+                let _ = tx.try_send(Err((FailClass::Seat, "unit left before seating".to_string())));
             }
             res
         }
@@ -804,7 +918,7 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
             let end = tone_end(&host, add, true);
             let res = ordered_release(host, plugin, unit, &mut tone, &name, true, end, &faults, &mut reported);
             if let Some(tx) = ready.take() {
-                let _ = tx.try_send(Err("unit dismissed before seating".to_string()));
+                let _ = tx.try_send(Err((FailClass::Seat, "unit dismissed before seating".to_string())));
             }
             res
         }
@@ -877,7 +991,8 @@ pub(super) fn serve_unit<P: OwnedPlugin>(
     }
 }
 
-/// Load plugin `id` from `path` into a chain unit owned through `unit`.
+/// Load plugin `id` from `path` into a chain unit owned through `unit`: the owner and its install's
+/// first answer, or the failure by D5's class with the owner's exit latch ([`LoadFail`]).
 #[allow(dead_code)] // P4 calls this
 pub(crate) fn load_unit(
     format: PluginFormat,
@@ -887,26 +1002,27 @@ pub(crate) fn load_unit(
     editor_parent: usize,
     sink: EventSink,
     tone: Option<ToneBinding>,
-) -> Result<(UnitOwner, Answer), String> {
+) -> Result<(UnitOwner, Answer), LoadFail> {
+    let spawn = |run: Box<dyn FnOnce(UnitCtx) -> Result<(), String> + Send>| {
+        spawn_owner(format, unit, editor_parent, sink, tone, run, spawn_thread)
+    };
     match format {
-        PluginFormat::Clap => spawn_unit(format, unit, editor_parent, sink, tone, move |ctx| {
+        PluginFormat::Clap => spawn(Box::new(move |ctx| {
             super::clap_engine::run_unit(ctx, &id, move || {
                 // SAFETY: PluginEntry::load runs the bundle's foreign entry-init code; the
                 // out-of-process scan vetted the bundle.
                 unsafe { PluginEntry::load(&path) }.map_err(|e| format!("load failed: {e}"))
             })
-        }),
-        PluginFormat::Vst3 => spawn_unit(format, unit, editor_parent, sink, tone, move |ctx| {
-            super::vst3_host::engine::run_unit(ctx, path, &id)
-        }),
-        PluginFormat::Vst2 => spawn_unit(format, unit, editor_parent, sink, tone, move |ctx| {
-            super::vst2_engine::run_unit(ctx, path, &id)
-        }),
+        })),
+        PluginFormat::Vst3 => spawn(Box::new(move |ctx| super::vst3_host::engine::run_unit(ctx, path, &id))),
+        PluginFormat::Vst2 => spawn(Box::new(move |ctx| super::vst2_engine::run_unit(ctx, path, &id))),
     }
 }
 
 /// Spawn a chain-unit owner thread (`lf-{format}-unit-{id}`) running `run` and wait for the initial
-/// install's answer (`Seated`/`Waiting`, or `Unanswered` if the claim stood past a second wait).
+/// install's answer (`Seated`/`Waiting`, or `Unanswered` if the claim stood past a second wait); a
+/// failure answers its reason alone (the fixtures'; [`load_unit`] answers its class too).
+#[cfg(test)]
 pub(super) fn spawn_unit(
     format: PluginFormat,
     unit: UnitHost,
@@ -915,11 +1031,19 @@ pub(super) fn spawn_unit(
     tone: Option<ToneBinding>,
     run: impl FnOnce(UnitCtx) -> Result<(), String> + Send + 'static,
 ) -> Result<(UnitOwner, Answer), String> {
-    spawn_unit_with(format, unit, editor_parent, sink, tone, run, |name, f| {
-        std::thread::Builder::new().name(name).spawn(f)
-    })
+    spawn_unit_with(format, unit, editor_parent, sink, tone, run, spawn_thread)
 }
 
+/// The owner thread, named, from the OS.
+fn spawn_thread(
+    name: String,
+    main: Box<dyn FnOnce() -> Result<(), String> + Send>,
+) -> std::io::Result<JoinHandle<Result<(), String>>> {
+    std::thread::Builder::new().name(name).spawn(main)
+}
+
+/// [`spawn_unit`] through `spawn` in place of the OS thread (a test's failing spawn).
+#[cfg(test)]
 pub(super) fn spawn_unit_with(
     format: PluginFormat,
     unit: UnitHost,
@@ -929,6 +1053,21 @@ pub(super) fn spawn_unit_with(
     run: impl FnOnce(UnitCtx) -> Result<(), String> + Send + 'static,
     spawn: impl FnOnce(String, Box<dyn FnOnce() -> Result<(), String> + Send>) -> std::io::Result<JoinHandle<Result<(), String>>>,
 ) -> Result<(UnitOwner, Answer), String> {
+    spawn_owner(format, unit, editor_parent, sink, tone, run, spawn).map_err(|fail| fail.why)
+}
+
+/// Spawn the owner and wait for its first answer, as [`spawn_unit`] says, answering a failure's class
+/// and the owner's exit latch ([`LoadFail`]): the latch's guard is the first thing the owner thread
+/// holds, so it is set once the thread's last drop ran.
+fn spawn_owner(
+    format: PluginFormat,
+    unit: UnitHost,
+    editor_parent: usize,
+    sink: EventSink,
+    tone: Option<ToneBinding>,
+    run: impl FnOnce(UnitCtx) -> Result<(), String> + Send + 'static,
+    spawn: impl FnOnce(String, Box<dyn FnOnce() -> Result<(), String> + Send>) -> std::io::Result<JoinHandle<Result<(), String>>>,
+) -> Result<(UnitOwner, Answer), LoadFail> {
     let slot = unit.slot();
     let id = unit.id();
     let running = Arc::new(AtomicBool::new(true));
@@ -940,6 +1079,8 @@ pub(super) fn spawn_unit_with(
     let (ready, ready_rx) = ready_channel();
     let param_ids = ParamIds::default();
     let shared_name = Arc::new(OnceLock::new());
+    let exit = ExitLatch::new();
+    let exit_guard = exit.guard();
     let on_spawn_err = unit.clone();
     let ctx = UnitCtx {
         unit,
@@ -955,7 +1096,11 @@ pub(super) fn spawn_unit_with(
         tone: ToneKeeper::new(tone, edited.clone()),
         shared_name: shared_name.clone(),
     };
-    let owner = match spawn(format!("lf-{}-unit-{id}", format.as_str()), Box::new(move || run(ctx))) {
+    let main = move || {
+        let _exit = exit_guard;
+        run(ctx)
+    };
+    let owner = match spawn(format!("lf-{}-unit-{id}", format.as_str()), Box::new(main)) {
         Ok(owner) => {
             drop(on_spawn_err);
             owner
@@ -964,7 +1109,7 @@ pub(super) fn spawn_unit_with(
             let why = format!("spawn unit owner thread: {e}");
             on_spawn_err.failed(why.clone());
             on_spawn_err.release();
-            return Err(why);
+            return Err(LoadFail { why, class: FailClass::Host(Retry::Launch), exit: ExitLatch::ended() });
         }
     };
 
@@ -979,20 +1124,23 @@ pub(super) fn spawn_unit_with(
         params_tx,
         param_ids,
         edited,
+        exit: exit.clone(),
     };
 
-    let report = match ready_rx.recv_timeout(LOAD_TIMEOUT) {
+    let wait = load_wait();
+    let report = match ready_rx.recv_timeout(wait) {
         Err(RecvTimeoutError::Timeout) => {
             if claim.abandon() {
-                // Setup hung before claiming: the owner will release at its claim check.
+                // Setup hung before claiming: the owner will release at its claim check, and its latch
+                // is set when its thread ends.
                 running.store(false, Release);
-                return Err("plugin setup timed out".to_string());
+                return Err(LoadFail { why: SETUP_TIMEOUT.to_string(), class: FailClass::Unresolved, exit });
             }
             log::warn!(
                 "[plugin_host] engine slot {slot} unit {id}: setup outlasted {} ms after claim; waiting for engine answer",
-                LOAD_TIMEOUT.as_millis()
+                wait.as_millis()
             );
-            match ready_rx.recv_timeout(LOAD_TIMEOUT) {
+            match ready_rx.recv_timeout(wait) {
                 Ok(ans) => Ok(ans),
                 Err(RecvTimeoutError::Timeout) => {
                     drop(ready_rx);
@@ -1013,15 +1161,18 @@ pub(super) fn spawn_unit_with(
             };
             Ok((build_handle(name, owner), answer))
         }
-        Ok(Err(e)) => {
+        // Joined: the latch reads set at the answer.
+        Ok(Err((class, why))) => {
             running.store(false, Release);
             let _ = owner.join();
-            Err(e)
+            Err(LoadFail { why, class, exit })
         }
+        // The owner ended without an answer: its runner failed before serving (the plugin's own setup)
+        // or the loop panicked.
         Err(_) => {
             running.store(false, Release);
             let _ = owner.join();
-            Err("plugin unit owner exited before answering".to_string())
+            Err(LoadFail { why: "plugin unit owner exited before answering".to_string(), class: FailClass::Plugin, exit })
         }
     }
 }
@@ -1039,12 +1190,19 @@ pub(crate) struct UnitOwner {
     param_ids: ParamIds,
     /// The owner's `ToneKeeper` flag: a host parameter set is a change to save.
     edited: Arc<AtomicBool>,
+    /// Set once the owner thread ended.
+    exit: ExitLatch,
 }
 
 #[allow(dead_code)] // the chain commands (P4) call these; the tests call them now
 impl UnitOwner {
     pub(crate) fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The owner thread's exit latch (D5): set once the thread ended, whoever ended it.
+    pub(crate) fn exit_latch(&self) -> &ExitLatch {
+        &self.exit
     }
 
     /// The plugin's parameters, with live values; refreshes the ids `set_param` accepts.
@@ -1191,7 +1349,7 @@ pub(crate) mod test_support {
     use lf_engine::grid::Frame;
     use lf_engine::{SlotEvent, UnitCx, UnitInfo, UnitKind, UnitParam, UnitProcessor};
 
-    use super::{serve_unit, spawn_unit, Answer, EventSink, Loaded, OwnedPlugin, PluginFormat, Reported, Setup, Terms, ToneBinding, UnitHost, UnitOwner};
+    use super::{serve_unit, spawn_owner, spawn_thread, Answer, EventSink, LoadFail, Loaded, OwnedPlugin, PluginFormat, Reported, Setup, Terms, ToneBinding, UnitCtx, UnitHost, UnitOwner};
     use crate::engine_io::SlotHost;
     use crate::host::engine_slot::Editor;
     use crate::host::ParamDesc;
@@ -1216,6 +1374,8 @@ pub(crate) mod test_support {
         /// When set, the load reads its tone as a real plugin's load does (`ToneKeeper::stored`) and
         /// records the state it would restore (`None`: nothing stored or unreadable).
         pub(crate) restores: Option<Arc<Mutex<Vec<Option<Vec<u8>>>>>>,
+        /// When set, the load fails with this reason (after `on_load`), as a plugin's own setup does.
+        pub(crate) fail_load: Option<String>,
     }
 
     impl Default for FakePluginConfig {
@@ -1234,6 +1394,7 @@ pub(crate) mod test_support {
                 released_count: None,
                 exited_flag: None,
                 restores: None,
+                fail_load: None,
             }
         }
     }
@@ -1344,8 +1505,18 @@ pub(crate) mod test_support {
         tone: Option<ToneBinding>,
         cfg: FakePluginConfig,
     ) -> Result<(UnitOwner, Answer), String> {
+        spawn_fake_unit_typed(unit_host, sink, tone, cfg).map_err(|fail| fail.why)
+    }
+
+    /// [`spawn_fake_unit`] answering as `load_unit` does: a failure's class and the owner's exit latch.
+    pub(crate) fn spawn_fake_unit_typed(
+        unit_host: UnitHost,
+        sink: EventSink,
+        tone: Option<ToneBinding>,
+        cfg: FakePluginConfig,
+    ) -> Result<(UnitOwner, Answer), LoadFail> {
         let exited = cfg.exited_flag.clone();
-        spawn_unit(PluginFormat::Clap, unit_host, 0, sink, tone, move |ctx| {
+        let run = move |ctx: UnitCtx| {
             let res = serve_unit(ctx, move |setup: Setup<'_>| {
                 if let Some(restores) = &cfg.restores {
                     let stored = setup.tone.stored().ok().flatten();
@@ -1353,6 +1524,9 @@ pub(crate) mod test_support {
                 }
                 if let Some(cb) = &cfg.on_load {
                     cb();
+                }
+                if let Some(why) = &cfg.fail_load {
+                    return Err(why.clone());
                 }
                 let rate = setup.slot.rate().unwrap_or(0);
                 let unit = Box::new(FakePluginUnit { source: cfg.source, latency: cfg.latency });
@@ -1363,7 +1537,8 @@ pub(crate) mod test_support {
                 flag.store(true, Ordering::SeqCst);
             }
             res
-        })
+        };
+        spawn_owner(PluginFormat::Clap, unit_host, 0, sink, tone, run, spawn_thread)
     }
 }
 

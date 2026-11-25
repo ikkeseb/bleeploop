@@ -20,6 +20,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use lf_engine::{InstallToken, SeatRefusal, UnitId, UnitKind, SLOT_COUNT};
+use lf_rig::{AddFail, AddOk, AddState, Retry};
 use serde::Serialize;
 use tauri::Emitter;
 
@@ -33,16 +34,12 @@ use super::unit_host::{
 use super::EngineHost;
 use crate::host::engine_slot::{EngineSlotEvent, EventSink, PluginFormat};
 use crate::host::tone::{Tone, ToneBinding, ToneKey, ToneStore, ToneTokens};
-use crate::host::unit_owner::{self, Answer, UnitOwner};
+use crate::host::unit_owner::{self, Answer, ExitLatch, FailClass, LoadFail, UnitOwner};
 use crate::host::{ParamDesc, PluginHostState};
 
 #[cfg(test)]
 #[path = "chain_cmds_tests.rs"]
 pub(crate) mod tests;
-
-/// Literal returned by `unit_owner::spawn_unit_with` when plugin setup hangs past its bound and the
-/// owner thread is left running (the module may stay loaded, so affinity leaks the holder).
-const SETUP_TIMEOUT_ERR: &str = "plugin setup timed out";
 
 /// How often a built-in unit's owner thread polls its mailbox and pending install op.
 const BUILTIN_POLL: Duration = Duration::from_millis(20);
@@ -94,14 +91,15 @@ pub(crate) fn chain_event(unit: UnitId, event: EngineSlotEvent) -> (&'static str
     }
 }
 
-/// Opener seam for loading a plugin unit: `unit_owner::load_unit` in production, a fake in tests.
-pub(crate) type Open<'a> = &'a dyn Fn(
+/// Opener seam for loading a plugin unit: `unit_owner::load_unit` in production (its failure typed,
+/// [`LoadFail`]), a fake in tests (a plain reason reads as `LoadFail`'s `From<String>` says).
+pub(crate) type Open<'a, E = LoadFail> = &'a dyn Fn(
     PluginFormat,
     &PluginRef,
     UnitHost,
     EventSink,
     Option<ToneBinding>,
-) -> Result<(UnitOwner, Answer), String>;
+) -> Result<(UnitOwner, Answer), E>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AffinityState {
@@ -380,6 +378,9 @@ pub(crate) struct Chains {
     id_guard: Mutex<()>,
     affinity: Mutex<Affinity>,
     tokens: Mutex<ToneTokens>,
+    /// The exit latches of unit owners not known to have ended, by the install token their add minted
+    /// (`exited`); `sweep` drops each once set. A leaf lock.
+    exits: Mutex<BTreeMap<InstallToken, ExitLatch>>,
     closing: AtomicBool,
     #[cfg(test)]
     fail_next_spawn: AtomicBool,
@@ -414,6 +415,7 @@ impl Chains {
             id_guard: Mutex::new(()),
             affinity: Mutex::new(Affinity::default()),
             tokens: Mutex::new(ToneTokens::default()),
+            exits: Mutex::new(BTreeMap::new()),
             closing: AtomicBool::new(false),
             #[cfg(test)]
             fail_next_spawn: AtomicBool::new(false),
@@ -494,6 +496,7 @@ impl Chains {
                 aff.release(inst, &path);
             }
         }
+        self.exits.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, exit| !exit.is_set());
     }
 
     /// Hand `entry` to `gone` while holding `gone` (and any source table lock in
@@ -681,9 +684,10 @@ impl Chains {
         }
     }
 
-    /// Add a unit (built-in or plugin) to `slot` at plate index `at`.
+    /// Add a unit (built-in or plugin) to `slot` at plate index `at`: `chain_add`'s wire over
+    /// [`Self::add_unit`], `Added` or the failure's reason.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn add(
+    pub(crate) fn add<E: Into<LoadFail>>(
         &self,
         host: &EngineHost,
         doc: (&PluginHostState, u32),
@@ -695,13 +699,40 @@ impl Chains {
         at: usize,
         tone_token: Option<u32>,
         sink: EventSink,
-        open: Open<'_>,
+        open: Open<'_, E>,
     ) -> Result<Added, String> {
         current_document(doc.0, doc.1)?;
+        match self.add_unit(host, slots, tones, slot, unit, spec, at, tone_token, sink, open) {
+            Ok(AddOk { state: AddState::Waiting, .. }) => Ok(Added::Waiting),
+            // `Matched` is the host add's answer (D9), never the player's.
+            Ok(AddOk { state: AddState::Seated | AddState::Matched, .. }) => Ok(Added::Seated),
+            Err(fail) => Err(fail_why(fail)),
+        }
+    }
+
+    /// The typed add (D5): what [`Self::add`] answers the player, before its wire. A failure says who
+    /// refused it ([`AddFail`]), with the install token `EngineHost::unit` minted for this attempt (none
+    /// for a refusal before the mint) and whether the unit's owner had ended at the answer; the owner's
+    /// latch stays readable by that token afterwards ([`Self::exited`]). `AddOk.token` is the plate's
+    /// `added_by`. No document check: the rig's restore adds through here too (CP3a part 2).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_unit<E: Into<LoadFail>>(
+        &self,
+        host: &EngineHost,
+        slots: &Mutex<[EngineSlot; SLOT_COUNT]>,
+        tones: Option<&ToneStore>,
+        slot: usize,
+        unit: UnitId,
+        spec: UnitSpec,
+        at: usize,
+        tone_token: Option<u32>,
+        sink: EventSink,
+        open: Open<'_, E>,
+    ) -> Result<AddOk, AddFail> {
         self.sweep(Some(host));
-        let (spec, bypassed) = spec.into_spec()?;
+        let (spec, bypassed) = spec.into_spec().map_err(refused)?;
         match spec {
-            Spec::Legacy => Err("legacy unit spec is not valid for chain_add".to_string()),
+            Spec::Legacy => Err(refused("legacy unit spec is not valid for chain_add".to_string())),
             Spec::Builtin { kind, params } => {
                 self.add_builtin(host, slots, slot, unit, kind, params, at, bypassed)
             }
@@ -711,8 +742,24 @@ impl Chains {
         }
     }
 
+    /// The owner's exit latch for the add that minted `token` (D5, D6): true once the owner thread
+    /// ended, or when none ran. Asked for a token an add answered, it is exact from that answer on, from
+    /// any thread; a token no add of this host answered yet reads true.
+    #[allow(dead_code)] // the rig's restore driver reads it (CP3a part 2); the tests now
+    pub(crate) fn exited(&self, token: InstallToken) -> bool {
+        let exits = self.exits.lock().unwrap_or_else(|e| e.into_inner());
+        !exits.get(&token).is_some_and(|latch| !latch.is_set())
+    }
+
+    /// Keep `exit` under `token` until it is set (`sweep` drops it then: a token kept by none reads set).
+    fn keep_exit(&self, token: InstallToken, exit: &ExitLatch) {
+        if !exit.is_set() {
+            self.exits.lock().unwrap_or_else(|e| e.into_inner()).insert(token, exit.clone());
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn add_plugin(
+    fn add_plugin<E: Into<LoadFail>>(
         &self,
         host: &EngineHost,
         slots: &Mutex<[EngineSlot; SLOT_COUNT]>,
@@ -724,41 +771,20 @@ impl Chains {
         bypassed: bool,
         tone_token: Option<u32>,
         sink: EventSink,
-        open: Open<'_>,
-    ) -> Result<Added, String> {
-        let format = check_plugin_format(&plugin)?;
+        open: Open<'_, E>,
+    ) -> Result<AddOk, AddFail> {
+        let format = check_plugin_format(&plugin).map_err(refused)?;
         if slot >= SLOT_COUNT {
-            return Err(format!("no slot {slot}"));
+            return Err(refused(format!("no slot {slot}")));
         }
 
         let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
         if self.closing.load(Acquire) {
-            return Err("the host is closing".to_string());
+            return Err(refused("the host is closing".to_string()));
         }
 
         // Lock order: order[slot] -> id_guard -> slots -> host.core.state.
-        let unit_host = {
-            let _id_guard = self.id_guard.lock().unwrap_or_else(|e| e.into_inner());
-            let slots_guard = slots.lock().map_err(|_| "engine slots poisoned".to_string())?;
-            for (s, entry) in slots_guard.iter().enumerate() {
-                if !matches!(entry, EngineSlot::Empty) {
-                    return Err(format!(
-                        "a plugin is loaded in slot {s} through the plugin slot: restart the app to use chains"
-                    ));
-                }
-            }
-            match host.unit(slot, unit, Spec::Plugin(plugin.clone()), at, bypassed) {
-                Ok(u) => u,
-                Err(why) => {
-                    if !host.core.closing.load(Acquire) && is_unit_leaving(host, unit) {
-                        return Err(format!(
-                            "unit {unit} is still leaving its chain (a take holds its removal); add it again when the take ends"
-                        ));
-                    }
-                    return Err(why);
-                }
-            }
-        };
+        let unit_host = self.mint(host, slots, slot, unit, Spec::Plugin(plugin.clone()), at, bypassed)?;
         let token = unit_host.install_token();
 
         let inst = self.affinity.lock().unwrap_or_else(|e| e.into_inner()).claim(&plugin.path);
@@ -806,8 +832,10 @@ impl Chains {
             }
         };
 
-        match open(format, &plugin, unit_host, sink, tone) {
+        match open(format, &plugin, unit_host, sink, tone).map_err(Into::into) {
             Ok((owner, answer)) => {
+                let exit = owner.exit_latch().clone();
+                self.keep_exit(token, &exit);
                 self.affinity
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -821,23 +849,21 @@ impl Chains {
                 if let Some(hook) = self.before_register_hook.lock().unwrap_or_else(|e| e.into_inner()).take() {
                     hook();
                 }
+                let closing = || (FailClass::Host(Retry::Launch), "the host is closing".to_string());
                 let (outcome_err, late_entry) = {
                     let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
                     let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
                     let state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
                     if self.closing.load(Acquire) {
-                        (
-                            Some("the host is closing".to_string()),
-                            Self::push_gone_locked(&mut gone, entry),
-                        )
+                        (Some(closing()), Self::push_gone_locked(&mut gone, entry))
                     } else if !state.table.active_row_for_id(unit).is_some_and(|r| r.token == token) {
                         let why = late_add_refusal_reason(&state, unit, token);
-                        (Some(why), Self::push_gone_locked(&mut gone, entry))
+                        (Some((FailClass::Seat, why)), Self::push_gone_locked(&mut gone, entry))
                     } else {
                         let late = reg
                             .insert(unit, entry)
                             .and_then(|prev| Self::push_gone_locked(&mut gone, prev));
-                        let err = late.as_ref().map(|_| "the host is closing".to_string());
+                        let err = late.as_ref().map(|_| closing());
                         (err, late)
                     }
                 };
@@ -845,21 +871,27 @@ impl Chains {
                     drop(order);
                     self.dispose_late_entry(late);
                 }
-                if let Some(err) = outcome_err {
-                    return Err(err);
+                if let Some((class, why)) = outcome_err {
+                    return Err(add_fail(class, why, token, exit.is_set()));
                 }
                 match answer {
-                    Answer::Seated { .. } => Ok(Added::Seated),
-                    Answer::Waiting { .. } => Ok(Added::Waiting),
-                    Answer::Unanswered => Err(format!(
-                        "the audio engine did not answer within 30 s: unit {unit} stays loading and seats if the engine answers"
-                    )),
+                    Answer::Seated { .. } => Ok(AddOk { state: AddState::Seated, token }),
+                    Answer::Waiting { .. } => Ok(AddOk { state: AddState::Waiting, token }),
+                    Answer::Unanswered => Err(AddFail::Unresolved {
+                        why: format!(
+                            "the audio engine did not answer within 30 s: unit {unit} stays loading and seats if the engine answers"
+                        ),
+                        token,
+                        exited: exit.is_set(),
+                    }),
                 }
             }
-            Err(e) => {
+            Err(LoadFail { why, class, exit }) => {
+                self.keep_exit(token, &exit);
                 {
                     let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
-                    if e == SETUP_TIMEOUT_ERR {
+                    // The owner may still be in plugin code: its module stays loaded.
+                    if class == FailClass::Unresolved {
                         aff.leak(inst, &plugin.path);
                     } else {
                         aff.release(inst, &plugin.path);
@@ -868,9 +900,43 @@ impl Chains {
                 if let Some((tok, tone)) = redeemed {
                     self.tokens.lock().unwrap_or_else(|e| e.into_inner()).repark(tok, tone);
                 }
-                Err(e)
+                Err(add_fail(class, why, token, exit.is_set()))
             }
         }
+    }
+
+    /// Reserve `unit` under `order[slot]` (held by the caller) and mint its install token
+    /// (`EngineHost::unit`): refused at once for a legacy plugin slot in this run, or as the host says
+    /// (no slot, closing, the id reserved or still leaving, a full chain), each before any unit code ran.
+    #[allow(clippy::too_many_arguments)]
+    fn mint(
+        &self,
+        host: &EngineHost,
+        slots: &Mutex<[EngineSlot; SLOT_COUNT]>,
+        slot: usize,
+        unit: UnitId,
+        spec: Spec,
+        at: usize,
+        bypassed: bool,
+    ) -> Result<UnitHost, AddFail> {
+        let _id_guard = self.id_guard.lock().unwrap_or_else(|e| e.into_inner());
+        let slots_guard = slots.lock().map_err(|_| refused("engine slots poisoned".to_string()))?;
+        for (s, entry) in slots_guard.iter().enumerate() {
+            if !matches!(entry, EngineSlot::Empty) {
+                return Err(refused(format!(
+                    "a plugin is loaded in slot {s} through the plugin slot: restart the app to use chains"
+                )));
+            }
+        }
+        host.unit(slot, unit, spec, at, bypassed).map_err(|why| {
+            if !host.core.closing.load(Acquire) && is_unit_leaving(host, unit) {
+                refused(format!(
+                    "unit {unit} is still leaving its chain (a take holds its removal); add it again when the take ends"
+                ))
+            } else {
+                refused(why)
+            }
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -884,46 +950,27 @@ impl Chains {
         params: unit_host::Params,
         at: usize,
         bypassed: bool,
-    ) -> Result<Added, String> {
+    ) -> Result<AddOk, AddFail> {
         if slot >= SLOT_COUNT {
-            return Err(format!("no slot {slot}"));
+            return Err(refused(format!("no slot {slot}")));
         }
 
         let order = self.order[slot].lock().unwrap_or_else(|e| e.into_inner());
         if self.closing.load(Acquire) {
-            return Err("the host is closing".to_string());
+            return Err(refused("the host is closing".to_string()));
         }
 
         // Lock order: order[slot] -> id_guard -> slots -> host.core.state.
-        let unit_host = {
-            let _id_guard = self.id_guard.lock().unwrap_or_else(|e| e.into_inner());
-            let slots_guard = slots.lock().map_err(|_| "engine slots poisoned".to_string())?;
-            for (s, entry) in slots_guard.iter().enumerate() {
-                if !matches!(entry, EngineSlot::Empty) {
-                    return Err(format!(
-                        "a plugin is loaded in slot {s} through the plugin slot: restart the app to use chains"
-                    ));
-                }
-            }
-            match host.unit(slot, unit, Spec::Builtin { kind, params: params.clone() }, at, bypassed) {
-                Ok(u) => u,
-                Err(why) => {
-                    if !host.core.closing.load(Acquire) && is_unit_leaving(host, unit) {
-                        return Err(format!(
-                            "unit {unit} is still leaving its chain (a take holds its removal); add it again when the take ends"
-                        ));
-                    }
-                    return Err(why);
-                }
-            }
-        };
+        let unit_host = self.mint(host, slots, slot, unit, Spec::Builtin { kind, params: params.clone() }, at, bypassed)?;
         let token = unit_host.install_token();
+        // A refusal after the mint, of the host's (no engine, the owner's spawn, closing): the token is the attempt's.
+        let host_fail = |why: String, retry: Retry| AddFail::Host { why, retry, token: Some(token) };
 
         let Some(terms) = unit_host.terms() else {
             let why = "no audio device is open".to_string();
             unit_host.failed(why.clone());
             unit_host.release();
-            return Err(why);
+            return Err(host_fail(why, Retry::Device));
         };
 
         let (boxed, clamped) = match self.factory.build(kind, &params, terms) {
@@ -931,7 +978,7 @@ impl Chains {
             Err(why) => {
                 unit_host.failed(why.clone());
                 unit_host.release();
-                return Err(why);
+                return Err(AddFail::Plugin { why, token, exited: true });
             }
         };
 
@@ -947,24 +994,29 @@ impl Chains {
         // only AFTER registering in `self.registry` so spawn failure cleanly drops/releases and
         // shutdown can never snapshot `registry` after `submit()` has handed the box to the engine.
         let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<(UnitHost, Unit, unit_host::Terms, Instant)>(1);
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<Added, String>>(1);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<BuiltinFirst>(1);
         let stop = Arc::new(AtomicBool::new(false));
         let wake = Arc::new((Mutex::new(()), Condvar::new()));
         let owner_stop = stop.clone();
         let owner_wake = wake.clone();
         let rebuild = Rebuild { factory: self.factory.clone(), kind, host: host.clone() };
+        // The owner thread holds the latch's guard first and drops it last; a thread that never starts
+        // drops it with its closure.
+        let exit = ExitLatch::new();
+        let exit_guard = exit.guard();
+        let main = move || {
+            let _exit = exit_guard;
+            serve_builtin(start_rx, ready_tx, owner_stop, owner_wake, rebuild)
+        };
         #[cfg(test)]
         let spawned = if self.fail_next_spawn.swap(false, Acquire) {
+            drop(main);
             Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "injected spawn failure"))
         } else {
-            std::thread::Builder::new()
-                .name(format!("lf-builtin-unit-{unit}"))
-                .spawn(move || serve_builtin(start_rx, ready_tx, owner_stop, owner_wake, rebuild))
+            std::thread::Builder::new().name(format!("lf-builtin-unit-{unit}")).spawn(main)
         };
         #[cfg(not(test))]
-        let spawned = std::thread::Builder::new()
-            .name(format!("lf-builtin-unit-{unit}"))
-            .spawn(move || serve_builtin(start_rx, ready_tx, owner_stop, owner_wake, rebuild));
+        let spawned = std::thread::Builder::new().name(format!("lf-builtin-unit-{unit}")).spawn(main);
 
         let handle = match spawned {
             Ok(h) => h,
@@ -973,9 +1025,10 @@ impl Chains {
                 let why = format!("could not spawn owner for built-in unit {unit}: {e}");
                 unit_host.failed(why.clone());
                 unit_host.release();
-                return Err(why);
+                return Err(host_fail(why, Retry::Launch));
             }
         };
+        self.keep_exit(token, &exit);
 
         let entry = Arc::new(Entry {
             slot,
@@ -1017,19 +1070,19 @@ impl Chains {
             // Drop `start_tx` so the idle owner thread exits without ever touching the engine.
             drop(start_tx);
             drop(boxed);
-            let msg = match err {
+            let fail = match err {
                 BuiltinRegErr::Closing => {
                     unit_host.failed("the host is closing".to_string());
-                    "the host is closing".to_string()
+                    host_fail("the host is closing".to_string(), Retry::Launch)
                 }
-                BuiltinRegErr::Inactive(why) => why,
+                BuiltinRegErr::Inactive(why) => AddFail::Seat { why, token, exited: exit.is_set() },
             };
             unit_host.release();
             drop(order);
             if let Some(late) = late_entry {
                 self.dispose_late_entry(late);
             }
-            return Err(msg);
+            return Err(fail);
         }
 
         // The caller's wait starts here, and the owner's first-answer bound with it.
@@ -1040,19 +1093,27 @@ impl Chains {
             unit_host.failed(why.clone());
             unit_host.release();
             self.retire_to_gone(unit, Some(token));
-            return Err(why);
+            return Err(host_fail(why, Retry::Launch));
         }
 
         match ready_rx.recv_timeout(BUILTIN_ADD_TIMEOUT.saturating_sub(asked.elapsed())) {
-            Ok(Ok(added)) => Ok(added),
-            Ok(Err(why)) => {
+            Ok(Ok(Added::Seated)) => Ok(AddOk { state: AddState::Seated, token }),
+            Ok(Ok(Added::Waiting)) => Ok(AddOk { state: AddState::Waiting, token }),
+            Ok(Err((class, why))) => {
+                // A failed first answer is the owner's last act: joined, its latch reads set, as a plugin
+                // owner's does (`unit_owner::load_unit` joins it too).
+                let owner = self.registry.lock().unwrap_or_else(|e| e.into_inner()).get(&unit).filter(|e| e.token == token).cloned();
+                if let Some(owner) = owner {
+                    owner.owner.join();
+                }
                 self.retire_to_gone(unit, Some(token));
-                Err(why)
+                Err(add_fail(class, why, token, exit.is_set()))
             }
-            Err(_) => Err(format!(
-                "built-in unit {unit} did not answer within {} s",
-                BUILTIN_ADD_TIMEOUT.as_secs()
-            )),
+            Err(_) => Err(AddFail::Unresolved {
+                why: format!("built-in unit {unit} did not answer within {} s", BUILTIN_ADD_TIMEOUT.as_secs()),
+                token,
+                exited: exit.is_set(),
+            }),
         }
     }
 
@@ -1256,7 +1317,7 @@ impl Chains {
     /// Reload `unit` with a fresh instance of `plugin` applying `tone_token`, if `unit` is still that
     /// seated plugin and was not re-added since `since`.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn reload(
+    pub(crate) fn reload<E: Into<LoadFail>>(
         &self,
         host: &EngineHost,
         doc: (&PluginHostState, u32),
@@ -1266,7 +1327,7 @@ impl Chains {
         since: u64,
         tone_token: u32,
         sink: EventSink,
-        open: Open<'_>,
+        open: Open<'_, E>,
     ) -> Result<Reloaded, String> {
         current_document(doc.0, doc.1)?;
         self.sweep(Some(host));
@@ -1356,19 +1417,20 @@ impl Chains {
         let binding = ToneBinding { store: store.clone(), key, imported: Some(imported) };
 
         let inst = self.affinity.lock().unwrap_or_else(|e| e.into_inner()).claim(&plugin.path);
-        match open(format, &plugin, unit_host, sink, Some(binding)) {
-            Err(e) => {
+        match open(format, &plugin, unit_host, sink, Some(binding)).map_err(Into::into) {
+            Err(LoadFail { why, class, .. }) => {
                 // The candidate's owner released it before answering: no outcome is read after this.
                 forget_reload_refusal(host, new_token);
                 {
                     let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
-                    if e == SETUP_TIMEOUT_ERR {
+                    // The owner may still be in plugin code: its module stays loaded.
+                    if class == FailClass::Unresolved {
                         aff.leak(inst, &plugin.path);
                     } else {
                         aff.release(inst, &plugin.path);
                     }
                 }
-                log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {e}");
+                log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {why}");
                 Ok(Reloaded::Failed)
             }
             Ok((owner, Answer::Seated { .. })) => {
@@ -1862,6 +1924,33 @@ fn late_add_refusal_reason(state: &unit_host::HostState, unit: UnitId, token: In
     format!("unit {unit} was refused or replaced before registration")
 }
 
+/// A refusal before the mint (D5's `Host`): no unit, no token, no owner; tried again at the next launch.
+fn refused(why: String) -> AddFail {
+    AddFail::Host { why, retry: Retry::Launch, token: None }
+}
+
+/// A failed add of the attempt `token`, by its class; `exited` is its owner's latch at the answer.
+fn add_fail(class: FailClass, why: String, token: InstallToken, exited: bool) -> AddFail {
+    match class {
+        FailClass::Host(retry) => AddFail::Host { why, retry, token: Some(token) },
+        FailClass::SourceTaken => AddFail::SourceTaken { why, token, exited },
+        FailClass::Seat => AddFail::Seat { why, token, exited },
+        FailClass::Plugin => AddFail::Plugin { why, token, exited },
+        FailClass::Unresolved => AddFail::Unresolved { why, token, exited },
+    }
+}
+
+/// The reason `chain_add`'s wire carries for a failed add.
+fn fail_why(fail: AddFail) -> String {
+    match fail {
+        AddFail::Host { why, .. }
+        | AddFail::SourceTaken { why, .. }
+        | AddFail::Seat { why, .. }
+        | AddFail::Plugin { why, .. }
+        | AddFail::Unresolved { why, .. } => why,
+    }
+}
+
 fn check_plugin_format(plugin: &PluginRef) -> Result<PluginFormat, String> {
     let format = PluginFormat::of_path(std::path::Path::new(&plugin.path))
         .ok_or_else(|| format!("{}: not a .clap, .vst3 or .dll plugin", plugin.path))?;
@@ -2000,7 +2089,10 @@ impl BuiltinSeat {
     }
 }
 
-fn send_first_answer(ready: &mut Option<SyncSender<Result<Added, String>>>, answer: Result<Added, String>) {
+/// A built-in owner's first answer: the install's, or its failure with its class (D5).
+type BuiltinFirst = Result<Added, (FailClass, String)>;
+
+fn send_first_answer(ready: &mut Option<SyncSender<BuiltinFirst>>, answer: BuiltinFirst) {
     if let Some(tx) = ready.take() {
         let _ = tx.try_send(answer);
     }
@@ -2035,7 +2127,7 @@ impl Rebuild {
 /// cleanly on stop.
 fn serve_builtin(
     start_rx: std::sync::mpsc::Receiver<(UnitHost, Unit, unit_host::Terms, Instant)>,
-    ready_tx: SyncSender<Result<Added, String>>,
+    ready_tx: SyncSender<BuiltinFirst>,
     stop: Arc<AtomicBool>,
     wake: Arc<(Mutex<()>, Condvar)>,
     rebuild: Rebuild,
@@ -2057,7 +2149,7 @@ fn serve_builtin(
         Err((returned, SubmitError::Closing)) => {
             drop(returned);
             host.release();
-            send_first_answer(&mut ready, Err("the host is closing".to_string()));
+            send_first_answer(&mut ready, Err((FailClass::Host(Retry::Launch), "the host is closing".to_string())));
             return;
         }
         Err((returned, err)) => {
@@ -2069,7 +2161,8 @@ fn serve_builtin(
                 host.failed(why.clone());
             }
             host.release();
-            send_first_answer(&mut ready, Err(why));
+            let class = if err == SubmitError::NoEngine { FailClass::Host(Retry::Device) } else { FailClass::Seat };
+            send_first_answer(&mut ready, Err((class, why)));
             return;
         }
     };
@@ -2081,13 +2174,13 @@ fn serve_builtin(
                     drop(seat.take_unit());
                     drop(unit);
                     host.release();
-                    send_first_answer(&mut ready, Err("unit left before seating".to_string()));
+                    send_first_answer(&mut ready, Err((FailClass::Seat, "unit left before seating".to_string())));
                     return;
                 }
                 Back::Dismissed => {
                     drop(seat.take_unit());
                     host.release();
-                    send_first_answer(&mut ready, Err("unit dismissed before seating".to_string()));
+                    send_first_answer(&mut ready, Err((FailClass::Seat, "unit dismissed before seating".to_string())));
                     return;
                 }
                 Back::Refused { unit, why } => {
@@ -2097,7 +2190,7 @@ fn serve_builtin(
                         drop(unit);
                         host.failed(msg.clone());
                         host.release();
-                        send_first_answer(&mut ready, Err(msg));
+                        send_first_answer(&mut ready, Err((FailClass::Seat, msg)));
                         return;
                     }
                     host.parked(msg);
@@ -2128,7 +2221,7 @@ fn serve_builtin(
                 let why = "built-in unit could not submit before timeout".to_string();
                 host.failed(why.clone());
                 host.release();
-                send_first_answer(&mut ready, Err(why));
+                send_first_answer(&mut ready, Err((FailClass::Seat, why)));
                 return;
             }
             let terms = host.terms();
@@ -2146,7 +2239,7 @@ fn serve_builtin(
                             drop(unit);
                             host.failed(why.clone());
                             host.release();
-                            send_first_answer(&mut ready, Err(why));
+                            send_first_answer(&mut ready, Err((FailClass::Plugin, why)));
                             return;
                         }
                         host.parked(why);
@@ -2163,7 +2256,7 @@ fn serve_builtin(
                         let why = "no audio device is open".to_string();
                         host.failed(why.clone());
                         host.release();
-                        send_first_answer(&mut ready, Err(why));
+                        send_first_answer(&mut ready, Err((FailClass::Host(Retry::Device), why)));
                         return;
                     }
                     seat = BuiltinSeat::Owed { unit };
@@ -2184,7 +2277,7 @@ fn serve_builtin(
                         let why = submit_error_reason(err);
                         host.failed(why.clone());
                         host.release();
-                        send_first_answer(&mut ready, Err(why));
+                        send_first_answer(&mut ready, Err((FailClass::Seat, why)));
                         return;
                     }
                     Err((returned, SubmitError::Refused(why))) => {
@@ -2193,18 +2286,19 @@ fn serve_builtin(
                             drop(returned);
                             host.failed(msg.clone());
                             host.release();
-                            send_first_answer(&mut ready, Err(msg));
+                            send_first_answer(&mut ready, Err((FailClass::Seat, msg)));
                             return;
                         }
                         host.parked(msg);
                         seat = BuiltinSeat::Parked { unit: returned };
                     }
-                    Err((returned, SubmitError::PortFull | SubmitError::NoEngine)) if !ever_seated && answering => {
+                    Err((returned, err @ (SubmitError::PortFull | SubmitError::NoEngine))) if !ever_seated && answering => {
                         drop(returned);
                         let why = "the slot's engine port is full".to_string();
                         host.failed(why.clone());
                         host.release();
-                        send_first_answer(&mut ready, Err(why));
+                        let class = if err == SubmitError::NoEngine { FailClass::Host(Retry::Device) } else { FailClass::Seat };
+                        send_first_answer(&mut ready, Err((class, why)));
                         return;
                     }
                     Err((returned, SubmitError::Stale | SubmitError::NoEngine | SubmitError::PortFull | SubmitError::Reloading | SubmitError::Behind)) => {
@@ -2214,7 +2308,7 @@ fn serve_builtin(
                         if !ever_seated {
                             drop(returned);
                             host.release();
-                            send_first_answer(&mut ready, Err(submit_error_reason(SubmitError::Removing)));
+                            send_first_answer(&mut ready, Err((FailClass::Seat, submit_error_reason(SubmitError::Removing))));
                             return;
                         }
                         seat = BuiltinSeat::Removing { unit: returned };
@@ -2223,7 +2317,7 @@ fn serve_builtin(
                         if !ever_seated {
                             drop(returned);
                             host.release();
-                            send_first_answer(&mut ready, Err("the host is closing".to_string()));
+                            send_first_answer(&mut ready, Err((FailClass::Host(Retry::Launch), "the host is closing".to_string())));
                             return;
                         }
                         seat = BuiltinSeat::Closing { unit: returned };
@@ -2231,7 +2325,7 @@ fn serve_builtin(
                     Err((returned, err @ (SubmitError::Superseded | SubmitError::Replaced))) => {
                         drop(returned);
                         host.release();
-                        send_first_answer(&mut ready, Err(submit_error_reason(err)));
+                        send_first_answer(&mut ready, Err((FailClass::Seat, submit_error_reason(err))));
                         return;
                     }
                 },
@@ -2310,7 +2404,7 @@ fn serve_builtin(
         host.abandon();
     }
     host.release();
-    send_first_answer(&mut ready, Err("the host is closing".to_string()));
+    send_first_answer(&mut ready, Err((FailClass::Host(Retry::Launch), "the host is closing".to_string())));
 }
 
 /// A command's work on the runtime's blocking pool, reading the one shared `PluginHostState` there (as
