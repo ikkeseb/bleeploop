@@ -35,7 +35,8 @@
  * RING MOD and ECHO on, REVERB off at a changed level, no OTT key): `lf.rig` is written whole before the
  * first add; the record's units are added in order under the minted ids; no slot level is sent before the
  * record is known, then each slot's as `SetSlotGain`, and no add before the engine took the levels and the
- * legacy sends' send-off, each refused apart (a full command ring) and resent with no reset frame until taken;
+ * legacy sends' send-off, each refused apart (a full command ring) and resent with no reset frame until taken
+ * (past the 10 s log point too, one log line);
  * before the first record each slot's fader shows the upgrade's level, and a level set on it lands in the
  * record's first write; the old sends wait in `pending` until the head seats (a held `loading` head
  * keeps them, a slot-level change meanwhile keeps units and `pending`), then are placed into the input-fed
@@ -47,7 +48,8 @@
  * keeping a level set meanwhile, in a new launch, nothing when no plugin add was issued yet, and in a reload
  * (before the add reached the host) nothing; a marker storage refuses adds and places nothing; a plugin after
  * an add rejected with no plate (in time) is never tried nor waited for, so the restore finishes and both are
- * restored next launch, a late plate holding its place; the settle starts only once each plugin add's outcome is in the
+ * restored next launch, a late plate holding its place, and the marker drops the rejected one, so a crash in
+ * the other slot's load forgets only that slot's plugin; the settle starts only once each plugin add's outcome is in the
  * feed (a lost reply's included), so a close meanwhile keeps the marker; a lost reply holds its unit's
  * place, so the units after it keep record order; a plugin missing from the scan keeps its entry and its
  * slot's `pending` until it is back; an Off slot keeps its input level and takes the sends; adds that never
@@ -1037,6 +1039,43 @@ await probe(async ({ browser, open }) => {
   await chainLaunch({ seed: { ...V089, 'lf.slotSource.1': 'off' }, failMarker: true });
   c = await chainSettle({ recall: [/^\[rig-recall\] could not store the in-flight marker; nothing restored/] });
   assert.deepEqual({ adds: c.adds, pending: slotsOf(c.rig).map((sl) => sl.pending.length) }, { adds: [], pending: [3, 3] }, 'nothing added or placed');
+
+  // C26. Slot A's plugin add rejected with no plate, then slot B's plugin crashing in its load (its add
+  // hangs, the marker left): the marker no longer names A's unit, so the next launch forgets only B's; A's
+  // unit stays in the record under its id (its tone is the id's) and is restored.
+  await chainLaunch({ seed: { 'lf.rig': rigText([1, ['1001 plugin']], [1, ['1002 look']]) }, mintFrom: 2001, reject: [1001], hang: [1002] });
+  await cp.waitForFunction(() => window.__chainProbe.adds.length === 2);
+  await cp.waitForTimeout(300);
+  assert.equal(await cp.evaluate(() => localStorage.getItem('lf.rigInFlight')), '[1002]', 'the marker names only the add that reached the host');
+  {
+    const lines = chainApp.consumeConsoleErrors(/^\[rig-recall\]/);
+    assert.equal(lines.length, 1, `[rig-recall] lines: ${JSON.stringify(lines)}`);
+    assert.match(lines[0], /^\[rig-recall\] slot 1: Fake Amp \(VST3\) was not restored/);
+  }
+  await chainLaunch({ mintFrom: 2001 });
+  c = await chainSettle({
+    adds: 1,
+    recall: [/^\[rig-recall\] the last launch stopped while restoring Fake Lookahead \(VST2\); its plugins are forgotten/],
+    toasts: ['Could not restore the plugins. Add a plugin again to load it. x1'],
+  });
+  assert.deepEqual({ adds: c.adds, rig: slotsOf(c.rig) }, {
+    adds: ['A0 1001 plugin'],
+    rig: [{ volume: 1, units: ['1001 plugin'], pending: [] }, { volume: 1, units: [], pending: [] }],
+  }, 'only B\'s plugin forgotten; A\'s kept under its id and restored');
+
+  // C27. The engine refuses the legacy sends' send-off for longer than the 10 s log point, then takes it with
+  // no reset frame between: one log line, no add meanwhile, then the restore goes on.
+  await chainLaunch({ seed: { 'lf.rig': rigText([1, ['1001 plugin']], [1, ['1002 synth']]) }, mintFrom: 2001, refuse: ['SetInputSend'] });
+  await cp.waitForTimeout(11_500);
+  assert.equal(await cp.evaluate(() => window.__chainProbe.adds.length), 0, 'no add while the send-off is refused');
+  {
+    const lines = chainApp.consumeConsoleErrors(/^\[instrument\] /);
+    assert.equal(lines.length, 1, `[instrument] lines: ${JSON.stringify(lines)}`);
+    assert.match(lines[0], /^\[instrument\] the legacy sends' send-off was refused for 10 s; still sending it/);
+  }
+  await cp.evaluate(() => void (window.__refuse = null));
+  c = await chainSettle({ adds: 2, refused: true });
+  assert.deepEqual(c.adds, ['A0 1001 plugin', 'B0 1002 synth'], 'taken past 10 s with no reset frame: the restore goes on');
 
   await chainContext.close();
 });

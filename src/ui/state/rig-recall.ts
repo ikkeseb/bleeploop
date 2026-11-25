@@ -326,11 +326,12 @@ export interface ChainRecallDeps {
   scan(paths: string[]): Promise<readonly PluginDescriptor[]>;
   /** The old keys through their resolvers, `scan` saying which legacy plugins are found. */
   snapshot(scan: readonly PluginDescriptor[], legacy: SavedRig): Promise<Omit<LegacySnapshot, 'legacyMarker' | 'reported'>>;
-  /** Apply slot `slot`'s volume (the slot level as shown and the engine's `SetSlotGain`); settles once the
-   * engine took it. */
-  setVolume(slot: 0 | 1, volume: number): Promise<void>;
-  /** Settles once the engine took the reset frame's send-off of the legacy sends (`legacySendsOff`). */
-  sendsOff(): Promise<void>;
+  /** Apply slot `slot`'s volume (the slot level as shown and the engine's `SetSlotGain`); settles true once
+   * the engine took it, false when no device runs before that. */
+  setVolume(slot: 0 | 1, volume: number): Promise<boolean>;
+  /** Settles true once the engine took the reset frame's send-off of the legacy sends (`legacySendsOff`),
+   * false when no device runs before that. */
+  sendsOff(): Promise<boolean>;
   /** Whether this page is the first of its native process: true a new launch, false a WebView reload, null
    * unknown (`midi.ts` `firstPageOfLaunch`). */
   firstPage(): Promise<boolean | null>;
@@ -466,7 +467,8 @@ function freshMint(mint: () => UnitId, taken: Set<UnitId>): () => UnitId {
  * instead when the first reset frame already had units (a DEV chain run before any record, at the slot gains
  * the engine kept), a slot level the player set meanwhile included; stored whole and read back before
  * anything is added, else nothing is restored or written and the next launch upgrades again. Each slot's
- * volume applied and the legacy sends' send-off taken by the engine before the first add.
+ * volume applied and the legacy sends' send-off taken by the engine before the first add (resent while
+ * refused, for as long as it takes); the device stopping first adds nothing and writes no units this launch.
  *
  * A leftover marker (`lf.rigInFlight`) names the plugin units whose adds the last restore issued: it did not
  * finish. In a new process (`firstPage`) with none of the record's plugin units reported, that launch died
@@ -477,8 +479,8 @@ function freshMint(mint: () => UnitId, taken: Set<UnitId>): () => UnitId {
  *
  * Then each record unit the reported chains lack is added under its id, slot 0 then slot 1, one at a time,
  * each after the units before it (a rejected add's plate holds its place; with no plate its outcome is
- * unknown, and the slot's later units wait for the next launch, never issued); a plugin missing from the scan
- * is skipped with one log line and keeps its entry; a failed plate keeps its entry too (the feed names no
+ * unknown, the marker no longer names it, and the slot's later units wait for the next launch, never
+ * issued); a plugin missing from the scan is skipped with one log line and keeps its entry; a failed plate keeps its entry too (the feed names no
  * cause). The marker is stored before the first add of any kind (storage refusing it: nothing is added or
  * placed this launch), and again naming each plugin unit just before its add (refused: no further add, no
  * placement); the settle starts once every plugin add issued has its outcome in the feed (seated or failed)
@@ -528,7 +530,11 @@ export async function recallChains(d: ChainRecallDeps): Promise<void> {
     ready = true;
     levelsMeanwhile.fill(null);
     // The engine has each slot's level and the legacy sends off before any unit goes in (review finding 6).
-    await Promise.all([d.setVolume(0, record.slots[0].volume), d.setVolume(1, record.slots[1].volume), d.sendsOff()]);
+    const taken = await Promise.all([d.setVolume(0, record.slots[0].volume), d.setVolume(1, record.slots[1].volume), d.sendsOff()]);
+    if (!taken.every(Boolean)) {
+      console.error('[rig-recall] the audio device stopped before the engine took the slot levels and the send-off; nothing restored this launch');
+      return;
+    }
     known = true;
 
     const plugins = record.slots.flatMap((s) => s.units.filter((u) => u.kind === 'plugin'));
@@ -614,7 +620,12 @@ export async function recallChains(d: ChainRecallDeps): Promise<void> {
           if (await plated(unit.id)) at++;
           else {
             // Reserved or not is unknown: a later unit's index would be a guess. They wait for the next launch.
+            // The marker drops it (review r3 finding 1): a crash in another slot's load forgets only the
+            // units whose adds reached the host.
             inFlight.delete(unit.id);
+            if (issued.delete(unit.id) && !storeChainMarker(issued)) {
+              console.error(`[rig-recall] could not store the in-flight marker without ${unitLabel(unit)}; a crash before the settle forgets it too`);
+            }
             break;
           }
         }

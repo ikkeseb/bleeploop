@@ -143,6 +143,13 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   plugin that crashes the host at load is still caught by the crash marker. Next check: a native `failedBy`
   on `UnitState` (`'plugin' | 'host'`, set where the unit owner's load fails), so a plugin's own load failure
   is forgotten again, as legacy recall forgets one (contract §6).
+- **The rig restore's late plate and its design** (E3f's last review rounds, DEV only). A plugin add rejected
+  over IPC whose plate shows after `rig-recall.ts`' plate wait (500 ms) loads while the crash marker no longer
+  names it, so a crash inside that load is not caught at the next launch. The restore's gates (the in-flight and
+  issued sets, the marker, the plate wait, the reload check, the resends) exist because the page infers what the
+  native host knows; a design read proposes moving the record, its writer, the restore and the marker native,
+  the page keeping only the one-time upgrade from the legacy keys (an owner's call before activation). Next
+  check: a probe case with the plate held past the wait and the load crashing.
 
 - **Chain mode's edges on the fake, left at the branch's third review** (each read from source by a
   reviewer, none reproduced; the next engine step rewrites held edits and moves, so they are judged there):

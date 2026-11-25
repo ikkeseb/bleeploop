@@ -36,6 +36,7 @@ import {
   slotUnset,
   withAt,
 } from './instrument-slots';
+import { engineDevice } from './engine-store';
 import { disarmEngineLive, disarmInputInternal, holdEngineLive, inputArmed, resumeEngineLive } from './native-io';
 import { readStoredNumber, writeStoredNumber } from './persist';
 import { forgetSlotPlugin, keepRigVolume, recallInFlight, rememberSlotPlugin, rigVolumes, savedRig, type SavedRig } from './rig-recall';
@@ -170,51 +171,55 @@ function upgradeLevels(): [number, number] {
   return [legacySlotVolume(slots[0], guitarFirst, recallInFlight()), legacySlotVolume(slots[1], guitarFirst, recallInFlight())];
 }
 /** Per slot, who waits for its next level the engine takes (`adoptRigVolume`). */
-const levelTaken: [(() => void)[], (() => void)[]] = [[], []];
+const levelTaken: [((took: boolean) => void)[], ((took: boolean) => void)[]] = [[], []];
 /** Per slot, the latest level send: an older one's resend stops. */
 const levelSends: [number, number] = [0, 0];
 
-/** How long a refused send goes again before it is given up (`resendUntilTaken`). */
-const RESEND_FOR_MS = 10_000;
+/** How long a refused send goes again before it is logged, once (`resendUntilTaken`). */
+const RESEND_LOG_MS = 10_000;
 
 /**
  * Send with `send` until the engine takes it: a refused batch (a briefly full command ring, a lost batch)
  * goes again a short backoff apart (20 ms doubling to 500 ms), while `wanted()` holds (a newer send of the
- * same thing, a new engine or no device running ends it), for at most RESEND_FOR_MS (one log line). True
- * once taken. Chain mode's rig restore waits on such sends (review r2 finding 3): the slot levels here, the
- * legacy sends' send-off in `engine-store.ts`.
+ * same thing, a new engine or no device running ends it), with no cap while it holds (review r3 finding 2:
+ * an IPC that recovers on the same device lets a waiting restore go on); one log line once refused for
+ * RESEND_LOG_MS. True once taken. Chain mode's rig restore waits on such sends (review r2 finding 3): the
+ * slot levels here, the legacy sends' send-off in `engine-store.ts`.
  */
 export async function resendUntilTaken(what: string, send: () => Promise<boolean>, wanted: () => boolean): Promise<boolean> {
-  const until = Date.now() + RESEND_FOR_MS;
+  const logAt = Date.now() + RESEND_LOG_MS;
+  let logged = false;
   for (let wait = 20; ; wait = Math.min(wait * 2, 500)) {
     if (await send()) return true;
     if (!wanted()) return false;
-    if (Date.now() + wait > until) {
-      console.error(`[instrument] ${what} was refused for ${RESEND_FOR_MS / 1000} s; given up until the next reset frame`);
-      return false;
+    if (!logged && Date.now() >= logAt) {
+      logged = true;
+      console.error(`[instrument] ${what} was refused for ${RESEND_LOG_MS / 1000} s; still sending it until the engine takes it`);
     }
     await new Promise((resolve) => setTimeout(resolve, wait));
     if (!wanted()) return false;
   }
 }
 
-/** Send slot `slot`'s chain-mode level (again while refused, until a newer level of the slot goes); once the
- * engine took it, its waiters go on. */
+/** Send slot `slot`'s chain-mode level (again while refused, until a newer level of the slot goes, while a
+ * device runs); once the engine took it, its waiters go on with true; with no device running they settle
+ * false (the restore adds nothing this launch). */
 function sendChainLevel(slot: 0 | 1, v: number): void {
   const n = ++levelSends[slot];
-  void resendUntilTaken(`slot ${slot + 1}'s level`, () => sendEngine({ SetSlotGain: [slot, v] }), () => levelSends[slot] === n).then((took) => {
-    if (took) levelTaken[slot].splice(0).forEach((go) => go());
+  const running = () => engineDevice() !== null;
+  void resendUntilTaken(`slot ${slot + 1}'s level`, () => sendEngine({ SetSlotGain: [slot, v] }), () => levelSends[slot] === n && running()).then((took) => {
+    if (took || !running()) levelTaken[slot].splice(0).forEach((go) => go(took));
   });
 }
 
-/** Chain mode's restore applies slot `slot`'s kept volume: shown, and the engine's slot gain. Settles once
- * the engine took a level of the slot (this one, resent while refused, or a later one): the restore's adds
- * wait for it, so no unit seats at another level. */
-export function adoptRigVolume(slot: 0 | 1, volume: number): Promise<void> {
+/** Chain mode's restore applies slot `slot`'s kept volume: shown, and the engine's slot gain. Settles true
+ * once the engine took a level of the slot (this one, resent while refused, or a later one): the restore's
+ * adds wait for it, so no unit seats at another level; false when no device runs before it was taken. */
+export function adoptRigVolume(slot: 0 | 1, volume: number): Promise<boolean> {
   const v = Math.max(0, Math.min(SLOT_GAIN_MAX, volume));
   setChainGains((prev) => withAt(prev, slot, v));
   chainLevelKnown[slot] = true;
-  const taken = new Promise<void>((go) => levelTaken[slot].push(go));
+  const taken = new Promise<boolean>((go) => levelTaken[slot].push(go));
   sendChainLevel(slot, v);
   return taken;
 }

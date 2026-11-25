@@ -55,9 +55,11 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
   adds the restore issued: stored (naming none) before the restore's first add of any kind, and again just
   before each plugin add, naming it too; storage refusing it, no further add and no placement that launch. A
   plugin never issued (missing from the scan, or after an add with no plate, whose later units wait for the
-  next launch) is neither named nor waited for. Removed only by a settle that completed, which starts once
-  each issued plugin add's outcome is in the feed (seated or failed), or at once when none reached the host
-  (none issued, or each rejected with no plate: an IPC failure is no crash). Left over, the last launch died
+  next launch) is neither named nor waited for, and an add rejected with no plate leaves the marker again, so
+  a crash in the other slot's load forgets only the units whose adds reached the host. Removed only by a
+  settle that completed, which starts once each issued plugin add's outcome is in the feed (seated or
+  failed), or at once when none reached the host (none issued, or each rejected with no plate: an IPC
+  failure is no crash). Left over, the last launch died
   restoring only in a new native process (the page's first native MIDI subscribe answers epoch 1, `midi.ts`
   `firstPageOfLaunch`) with none of the record's plugin units in the first reported chains: the record
   forgets the units the marker names only, through the record's one writer (a level set meanwhile stays),
