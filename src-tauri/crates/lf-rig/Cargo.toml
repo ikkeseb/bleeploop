@@ -2,7 +2,6 @@
 name = "lf-rig"
 version = "0.1.0"
 description = "BleepLoop's rig record rules: chain mode's record, its projection and its restore, pure, tested off Windows"
-authors = ["ikkeseb"]
 license = "MIT"
 repository = "https://github.com/ikkeseb/bleeploop"
 edition = "2021"
@@ -14,4 +13,6 @@ publish = false
 [dependencies]
 lf-engine = { path = "../lf-engine" }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# `float_roundtrip`: parse every number to the exact f64 the page wrote (D12); the default parser may
+# land one ulp off (0.9999999999999999 → 1). Feature unification turns it on for the app's serde_json too.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }

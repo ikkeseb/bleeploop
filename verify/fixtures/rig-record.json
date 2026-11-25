@@ -28,7 +28,7 @@
       "lead": 0.8,
       "bass": 1.2,
       "pad": 1,
-      "piano": 0.5,
+      "piano": 0.9999999999999999,
       "organ": 1,
       "drum": 1.1
     },
@@ -161,7 +161,7 @@
               "gainLead": 0.8,
               "gainBass": 1.2,
               "gainPad": 1,
-              "gainPiano": 0.5,
+              "gainPiano": 0.9999999999999999,
               "gainOrgan": 1,
               "gainDrum": 1.1
             },
@@ -183,5 +183,60 @@
         ]
       }
     ]
-  }
+  },
+  "written": [
+    {
+      "version": 1,
+      "slots": [
+        {
+          "volume": 1,
+          "units": [
+            {
+              "id": 1,
+              "kind": "plugin",
+              "plugin": {
+                "format": "clap",
+                "path": "C:\\Program Files\\Common Files\\CLAP\\Amp.clap",
+                "id": "com.example.amp"
+              }
+            },
+            {
+              "id": 2,
+              "kind": "ott",
+              "params": {}
+            },
+            {
+              "id": 3,
+              "kind": "ring",
+              "bypass": true
+            },
+            {
+              "id": 4,
+              "kind": "echo",
+              "params": {},
+              "bypass": false
+            }
+          ]
+        },
+        {
+          "volume": 0.5,
+          "units": [
+            {
+              "id": 5,
+              "kind": "synth",
+              "params": {
+                "instrument": 1
+              }
+            }
+          ],
+          "pending": [
+            {
+              "id": 6,
+              "kind": "reverb"
+            }
+          ]
+        }
+      ]
+    }
+  ]
 }

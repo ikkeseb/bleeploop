@@ -222,6 +222,12 @@ check('the fixture: upgradeRig(input) is its record, and serializeRig writes tha
   assert.deepEqual(JSON.parse(serializeRig(upgraded)), record);
 });
 
+check("the fixture's written records are ones the page writes: parseRig then serializeRig gives each back (bypass omitted, params {})", () => {
+  const { written } = JSON.parse(readFileSync(new URL('../fixtures/rig-record.json', import.meta.url), 'utf8'));
+  assert.ok(written.length > 0);
+  for (const w of written) assert.deepEqual(JSON.parse(serializeRig(parseRig(JSON.stringify(w)))), w);
+});
+
 // ── placement ──────────────────────────────────────────────────────────────────────────────────────────
 
 const state = (id, over = {}) => ({ id, kind: 'plugin', plugin: AMP, bypass: false, source: false, name: 'Amp', latency: 0, state: 'seated', ...over });

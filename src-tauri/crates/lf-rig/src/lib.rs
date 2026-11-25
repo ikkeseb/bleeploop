@@ -19,17 +19,20 @@
 //! | [`view`] | The chain model as the rig reads it ([`RigView`], [`PlateView`]) |
 //! | [`add`] | An add's answer as the restore sees it ([`AddOk`], [`AddFail`]) and where it goes ([`Place`]) |
 //! | [`answer`] | The handover's IPC shapes ([`RigAnswer`], [`RigImport`], [`NoticeId`]) |
+//! | [`plan`] | What the restore holds per record unit ([`Plan`], [`Disposition`]): filled by the restore, read by the projection |
 //!
 //! The decisions cited as `D<n>` are the build plan's (`native-rig-plan.md`, a working document
 //! while the move is open); each lands in `docs/unit-contract.md` with the checkpoint that builds it.
 
 pub mod add;
 pub mod answer;
+pub mod plan;
 pub mod record;
 pub mod view;
 
 pub use add::{AddFail, AddOk, AddState, Place, Retry};
 pub use answer::{Notice, NoticeId, RigAnswer, RigImport, RigStatus, IMPORT_STALE};
+pub use plan::{Disposition, Plan};
 pub use record::{Params, PluginRecord, RigRecord, SlotRecord, UnitBody, UnitRecord, Version1};
 pub use view::{PlateState, PlateView, PluginRefView, RigView};
 

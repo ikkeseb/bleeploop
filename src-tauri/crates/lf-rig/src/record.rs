@@ -7,6 +7,12 @@
 //! a plugin unit without its plugin or a unit id 0 fails the whole parse. The reader the store uses on
 //! a file is tolerant (`parseRig`'s rules: a bad unit, an unknown parameter or a reused id skipped, a
 //! bad volume read as unity) and lands with the store (CP2a).
+//!
+//! **Field presence round-trips (D12).** The page reads and writes `bypass` and `params` as optional,
+//! so a record it wrote may omit a unit's `bypass` or carry `params: {}`; the native record keeps each
+//! as it was written ([`UnitRecord::bypass`], [`UnitBody::Builtin`]'s `params`), never adds or drops
+//! a field. Numbers parse exactly (serde_json's `float_roundtrip`): a value the page wrote comes back
+//! as the same `f64`.
 
 use std::collections::BTreeMap;
 
@@ -73,8 +79,17 @@ pub struct UnitRecord {
     /// unit's life, across launches (its tone file is `unit-<id>.tone`).
     pub id: UnitId,
     pub body: UnitBody,
-    /// Whether the unit is bypassed. Always written; absent reads false (as `addSpec` reads it).
-    pub bypass: bool,
+    /// Whether the unit is bypassed, as written: `None` when the record omits it, which reads false
+    /// ([`UnitRecord::bypassed`], as `addSpec` reads it). Kept apart from `Some(false)` so the
+    /// record serializes as it was written.
+    pub bypass: Option<bool>,
+}
+
+impl UnitRecord {
+    /// Whether the unit is bypassed (an omitted `bypass` is not).
+    pub fn bypassed(&self) -> bool {
+        self.bypass == Some(true)
+    }
 }
 
 /// What a unit is, by kind.
@@ -83,8 +98,9 @@ pub enum UnitBody {
     /// A plugin: its identity, which its tone file is checked against, and the name the scan gave it.
     Plugin(PluginRecord),
     /// A built-in (`kind` is never [`UnitKind::Plugin`]) with the values it was last applied with;
-    /// a parameter it does not list starts at the engine's default. Empty params are not written.
-    Builtin { kind: UnitKind, params: Params },
+    /// a parameter it does not list starts at the engine's default. `params` is as written: `None`
+    /// when the record omits it, `Some` (possibly empty, `{}`) when it carries one.
+    Builtin { kind: UnitKind, params: Option<Params> },
 }
 
 /// A plugin as the record keeps it (`RigPlugin` in TS): its identity and, for the notice and the logs,
@@ -109,7 +125,8 @@ const KIND_KEYS: [(UnitKind, &str); 6] = [
     (UnitKind::Synth, "synth"),
 ];
 
-/// A unit as JSON spells it: `{ id, kind, plugin? , params?, bypass? }`.
+/// A unit as JSON spells it: `{ id, kind, plugin?, params?, bypass? }`, each optional field kept
+/// present or absent as read.
 #[derive(Serialize, Deserialize)]
 struct RawUnit {
     id: UnitId,
@@ -118,8 +135,8 @@ struct RawUnit {
     plugin: Option<PluginRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     params: Option<BTreeMap<String, f64>>,
-    #[serde(default)]
-    bypass: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bypass: Option<bool>,
 }
 
 impl TryFrom<RawUnit> for UnitRecord {
@@ -135,11 +152,17 @@ impl TryFrom<RawUnit> for UnitRecord {
             (Some(UnitKind::Plugin), Some(plugin)) => UnitBody::Plugin(plugin),
             (Some(UnitKind::Plugin), None) => return Err(format!("plugin unit {} without its plugin", raw.id)),
             (Some(kind), _) => {
-                let mut params = Params::new();
-                for (key, value) in raw.params.unwrap_or_default() {
-                    let param = UnitParam::from_key(&key).ok_or_else(|| format!("unknown unit parameter {key:?}"))?;
-                    params.push((param, value));
-                }
+                let params = raw
+                    .params
+                    .map(|map| {
+                        map.into_iter()
+                            .map(|(key, value)| {
+                                let param = UnitParam::from_key(&key).ok_or_else(|| format!("unknown unit parameter {key:?}"))?;
+                                Ok((param, value))
+                            })
+                            .collect::<Result<Params, String>>()
+                    })
+                    .transpose()?;
                 UnitBody::Builtin { kind, params }
             }
         };
@@ -153,7 +176,7 @@ impl From<UnitRecord> for RawUnit {
         let (kind, plugin, params) = match unit.body {
             UnitBody::Plugin(plugin) => ("plugin", Some(plugin), None),
             UnitBody::Builtin { kind, params } => {
-                let params = (!params.is_empty()).then(|| params.into_iter().map(|(p, v)| (p.key().to_owned(), v)).collect());
+                let params = params.map(|params| params.into_iter().map(|(p, v)| (p.key().to_owned(), v)).collect());
                 (key(kind), None, params)
             }
         };
