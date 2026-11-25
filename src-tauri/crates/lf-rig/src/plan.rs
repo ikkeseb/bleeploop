@@ -40,8 +40,11 @@ pub enum Disposition {
     Matched { token: InstallToken },
     /// Not restored this launch, kept at its place for the next: missing from the scan, a host or seat
     /// refusal, an unresolved add whose owner exited, the restore stopped, no plugin host. `why` is for
-    /// logs; a retry in this process (D5's `Device`) is the machine's own state.
-    Held { why: String },
+    /// logs; a retry in this process (D5's `Device`) is the machine's own state. `token` is the
+    /// attempt's when an add got past the mint (a seat refusal, an unresolved add that failed later, a
+    /// host refusal after the mint), so the projection tells its failed plate from a later plate under
+    /// the same id, and the player's removal of that plate from a `Held` that never had one.
+    Held { why: String, token: Option<InstallToken> },
     /// Dropped: its plugin's own load failed (D5) or a crash marker named it (D6). Its tone files go
     /// with it (the machine's `Forget` action).
     Forgotten,

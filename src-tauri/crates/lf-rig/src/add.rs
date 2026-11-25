@@ -6,10 +6,10 @@
 //! **An attempt is its install token (D3, D5, D6).** `EngineHost::unit` mints the token (its `Row`)
 //! before any plugin code runs, and the plate the add creates carries it as
 //! [`crate::PlateView::added_by`]. Every answer past that mint names it ([`AddOk::token`], each
-//! [`AddFail`] but `Host`), so the restore ties a late outcome, a `Waiting` that fails later, and the
+//! [`AddFail`]; `Host`'s only when it came after the mint), so the restore ties a late outcome, a `Waiting` that fails later, and the
 //! exit latch to this attempt, never to a later plate under the same id. Native keeps the owner's exit
 //! latch per token, also after `Waiting`, readable by `close` while the driver is blocked; a later
-//! `LatchSet` names the token, not the unit. A `Host` refusal comes before the mint: no token.
+//! `LatchSet` names the token, not the unit. A `Host` refusal before the mint has no token.
 
 use lf_engine::{InstallToken, UnitId};
 
@@ -51,10 +51,12 @@ pub enum AddState {
 /// when false, a later `LatchSet` for the token says it ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AddFail {
-    /// Refused before the token was minted, so before any plugin code ran (a format, slot, closing or
-    /// legacy-mix refusal, the id reserved or still leaving, the owner's spawn, no engine). No owner
-    /// ran, so nothing to wait for. The restore holds the unit at its place (`Held`).
-    Host { why: String, retry: Retry },
+    /// Refused before any plugin code ran (a format, slot, closing or legacy-mix refusal, the id
+    /// reserved or still leaving, the owner's spawn, no engine). No owner ran, so nothing to wait for.
+    /// The restore holds the unit at its place (`Held`). `token` is `None` for a refusal before the
+    /// mint, and the attempt's for one after it (today the owner's spawn and no engine come after
+    /// `EngineHost::unit`, so their failed plate carries it).
+    Host { why: String, retry: Retry, token: Option<InstallToken> },
     /// The unit is a source and a source the player put in already heads the slot. The restore yields
     /// it (`Yielded`, D9).
     SourceTaken { why: String, token: InstallToken, exited: bool },
