@@ -1157,6 +1157,10 @@ pub(crate) mod test_support {
         pub(crate) state_bytes: Vec<u8>,
         pub(crate) on_state: Option<Arc<dyn Fn() + Send + Sync>>,
         pub(crate) on_reactivate: Option<Arc<dyn Fn() + Send + Sync>>,
+        /// The role its unit reports from a re-activation on (an effect that comes back an instrument).
+        pub(crate) source_after_reactivate: Option<bool>,
+        /// Called on every owner turn (`OwnedPlugin::turn`).
+        pub(crate) on_turn: Option<Arc<dyn Fn() + Send + Sync>>,
         pub(crate) on_release: Option<Arc<dyn Fn() + Send + Sync>>,
         pub(crate) released_count: Option<Arc<AtomicUsize>>,
         pub(crate) exited_flag: Option<Arc<AtomicBool>>,
@@ -1171,6 +1175,8 @@ pub(crate) mod test_support {
                 state_bytes: b"fake-tone".to_vec(),
                 on_state: None,
                 on_reactivate: None,
+                source_after_reactivate: None,
+                on_turn: None,
                 on_release: None,
                 released_count: None,
                 exited_flag: None,
@@ -1223,16 +1229,22 @@ pub(crate) mod test_support {
 
         fn reactivate(
             &mut self,
-            unit: Box<Self::Unit>,
+            mut unit: Box<Self::Unit>,
             _terms: Terms,
         ) -> Result<Box<Self::Unit>, (Box<Self::Unit>, String)> {
             if let Some(cb) = &self.cfg.on_reactivate {
                 cb();
             }
+            if let Some(source) = self.cfg.source_after_reactivate {
+                unit.source = source;
+            }
             Ok(unit)
         }
 
         fn turn(&mut self, _sink: &EventSink) -> Reported {
+            if let Some(cb) = &self.cfg.on_turn {
+                cb();
+            }
             Reported::default()
         }
 

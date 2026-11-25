@@ -3421,10 +3421,14 @@ fn p4f1_5b_evicted_source_retrying_after_rebuild_never_replaces_newer_source() {
 
     // Evicted Source A now retries `submit()` after newer Source B has already queued: it keeps its
     // unit (the engine has not taken B yet).
+    // Exactly `Behind` (named by its Debug form, as the edge tests do): `Replaced` retires A's tone and
+    // `Superseded` ends its owner, both before the engine has taken B.
     let kept_a = match u_a.submit(evicted_a, t2) {
         Ok(op) => panic!("evicted source A must not enqueue to replace newer source B (got Ok({op:?}))"),
-        Err((_, SubmitError::Replaced)) => panic!("A must not retire before the engine has taken B"),
-        Err((returned_a, _)) => returned_a,
+        Err((returned_a, e)) => {
+            assert_eq!(format!("{e:?}"), "Behind", "A must keep its unit until the engine has taken B");
+            returned_a
+        }
     };
 
     // Service the port: Source B seats cleanly and remains the sole source in slot 0, and A, out of
@@ -3794,6 +3798,373 @@ fn edge_b_a_newer_source_applied_by_a_rebuilds_idle_service_ends_an_older_parked
     assert_eq!(host.wait_op(rem_b, Duration::from_secs(2)).unwrap(), OpState::Applied);
     drop(u_b.take_back());
     u_b.release();
+}
+
+/// Seat `n` units' worth of moves of `id` on `slot` with the engine still, until the port is full;
+/// returns how many entered.
+fn fill_port_with_moves(host: &EngineHost, id: UnitId) -> usize {
+    let mut pushed = 0;
+    loop {
+        match host.move_unit(id, 0) {
+            Ok(_) => pushed += 1,
+            Err(why) => {
+                assert!(why.contains("port is full"), "unexpected error filling the port: {why}");
+                return pushed;
+            }
+        }
+        assert!(pushed <= 4 * lf_engine::MAX_UNITS, "the slot's port never filled");
+    }
+}
+
+/// A unit reserved on slot 0 whose install finds the port full: it claims the port's next place.
+fn claim_a_full_port(host: &EngineHost, id: UnitId, stops: &Arc<AtomicUsize>) -> (super::unit_host::UnitHost, Unit, Terms) {
+    let u = host.unit(0, id, Spec::Plugin(plugin_ref("claim")), 1, false).expect("reserve the claimant");
+    u.activated(Activated { name: "claim".into(), source: false, latency: 0 });
+    let terms = u.terms().unwrap();
+    match u.submit(LatentUnit::new(9, 0, stops.clone()), terms) {
+        Err((unit, SubmitError::PortFull)) => (u, unit, terms),
+        Err((_, e)) => panic!("expected PortFull, got {e:?}"),
+        Ok(op) => panic!("expected PortFull, got Ok({op:?})"),
+    }
+}
+
+/// Chain host edge c, the claim (review round 2, finding 9; host level, so nothing races): an install
+/// that found its slot's port full keeps the place it needs. The port is served, but the model has not
+/// taken the answers yet, so it can count no place to spare: a later move is refused while the claim
+/// stands, the claimant's retry enters, then the move. Red before the claim (b992d39): the move entered
+/// first.
+#[test]
+fn edge_c_a_claimed_place_is_not_taken_while_no_other_place_is_known_free() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+    let u_x = host.unit(0, 710, Spec::Plugin(plugin_ref("x")), 0, false).expect("reserve X");
+    u_x.activated(Activated { name: "x".into(), source: false, latency: 0 });
+    let op_x = ok_op(u_x.submit(LatentUnit::new(1, 0, stops.clone()), u_x.terms().unwrap()));
+    assert_eq!(host.wait_op(op_x, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    device.stop();
+    fill_port_with_moves(&host, 710);
+    let (u_c, box_c, terms) = claim_a_full_port(&host, 711, &stops);
+
+    super::unit_host::service_if_idle(&host.core);
+    let refused = host.move_unit(710, 0).expect_err("a later move must not take the claimed place");
+    assert!(refused.contains("port is full"), "got: {refused}");
+    let op_c = ok_op(u_c.submit(box_c, terms));
+    host.move_unit(710, 0).expect("the move enters once the claimant has");
+
+    let mut ev = Vec::new();
+    for _ in 0..8 {
+        super::unit_host::service_if_idle(&host.core);
+        host.drain_feed(&mut ev);
+    }
+    assert_eq!(u_c.poll(op_c), OpState::Applied);
+    for (id, u) in [(711, &u_c), (710, &u_x)] {
+        let Removal::Sent(rem) = host.remove_unit(id).unwrap() else { panic!("expected Sent") };
+        super::unit_host::service_if_idle(&host.core);
+        host.drain_feed(&mut ev);
+        assert_eq!(host.wait_op(rem, Duration::from_secs(2)).unwrap(), OpState::Applied);
+        drop(u.take_back());
+    }
+    u_c.release();
+    u_x.release();
+}
+
+/// Review round 2, finding 4b: a claim refuses a later removal or move only while it holds the last
+/// free places. Served and with its answers taken, the port has room for the claimant and more, so
+/// both enter while the claim stands, and the claimant's retry still enters. Red on 6d629e4: both
+/// answered "port is full" while any claim stood.
+#[test]
+fn edge_c_a_claim_lets_a_later_edit_in_while_the_port_has_room_to_spare() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+    let mut units = Vec::new();
+    for (id, at) in [(720, 0), (721, 1)] {
+        let u = host.unit(0, id, Spec::Plugin(plugin_ref("room")), at, false).expect("reserve");
+        u.activated(Activated { name: "room".into(), source: false, latency: 0 });
+        let op = ok_op(u.submit(LatentUnit::new(1, 0, stops.clone()), u.terms().unwrap()));
+        assert_eq!(host.wait_op(op, Duration::from_secs(2)).unwrap(), OpState::Applied);
+        units.push(u);
+    }
+    device.stop();
+    fill_port_with_moves(&host, 720);
+    let (u_c, box_c, terms) = claim_a_full_port(&host, 722, &stops);
+
+    let mut ev = Vec::new();
+    for _ in 0..8 {
+        super::unit_host::service_if_idle(&host.core);
+        host.drain_feed(&mut ev);
+    }
+    host.move_unit(720, 1).expect("a move with room to spare enters while the claim stands");
+    let Removal::Sent(rem) = host.remove_unit(721).expect("so does a removal") else { panic!("expected Sent") };
+    let op_c = ok_op(u_c.submit(box_c, terms));
+    for _ in 0..8 {
+        super::unit_host::service_if_idle(&host.core);
+        host.drain_feed(&mut ev);
+    }
+    assert_eq!(host.wait_op(rem, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert_eq!(u_c.poll(op_c), OpState::Applied);
+
+    drop(units[1].take_back());
+    for (id, u) in [(722, &u_c), (720, &units[0])] {
+        let Removal::Sent(rem) = host.remove_unit(id).unwrap() else { panic!("expected Sent") };
+        super::unit_host::service_if_idle(&host.core);
+        host.drain_feed(&mut ev);
+        assert_eq!(host.wait_op(rem, Duration::from_secs(2)).unwrap(), OpState::Applied);
+        drop(u.take_back());
+    }
+    u_c.release();
+    for u in units {
+        u.release();
+    }
+}
+
+/// Review round 2, finding 4: a claim stands only while its owner retries. An owner that stops (held
+/// in a plugin's re-activation after a restart, or gone in a panic before its `release`) keeps its row
+/// but not its claim: once the lease lapses, a later edit enters though the port's room is not yet
+/// counted. Red on 6d629e4: the claim lived as long as the row, and the move was refused for good.
+#[test]
+fn edge_c_a_claim_its_owner_stopped_renewing_lapses() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+    let u_x = host.unit(0, 730, Spec::Plugin(plugin_ref("x")), 0, false).expect("reserve X");
+    u_x.activated(Activated { name: "x".into(), source: false, latency: 0 });
+    let op_x = ok_op(u_x.submit(LatentUnit::new(1, 0, stops.clone()), u_x.terms().unwrap()));
+    assert_eq!(host.wait_op(op_x, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    device.stop();
+    fill_port_with_moves(&host, 730);
+    let (u_c, box_c, _terms) = claim_a_full_port(&host, 731, &stops);
+
+    // The port is served; the claimant never retries (its row stays live), and nothing takes the answers.
+    super::unit_host::service_if_idle(&host.core);
+    let deadline = Instant::now() + PATIENCE;
+    while let Err(why) = host.move_unit(730, 0) {
+        assert!(why.contains("port is full"), "unexpected error: {why}");
+        assert!(Instant::now() < deadline, "a claim its owner stopped renewing held the port for good");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(host.core.state.lock().unwrap().table.has_active_row(731), "the claimant's row stayed live");
+
+    drop(box_c);
+    u_c.failed("stopped".into());
+    u_c.release();
+    let mut ev = Vec::new();
+    for _ in 0..8 {
+        super::unit_host::service_if_idle(&host.core);
+        host.drain_feed(&mut ev);
+    }
+    let Removal::Sent(rem) = host.remove_unit(730).unwrap() else { panic!("expected Sent") };
+    super::unit_host::service_if_idle(&host.core);
+    host.drain_feed(&mut ev);
+    assert_eq!(host.wait_op(rem, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    drop(u_x.take_back());
+    u_x.release();
+}
+
+/// Review round 2, finding 1: a source whose seat is withdrawn (an owner's restart) and whose reseat
+/// would queue behind a newer source's install (which takes that seat) and that source's removal waits
+/// (`Behind`) instead; the newer source seating ends it (`Back::Dismissed`), and nothing seats once
+/// the newer one is removed. Red on 6d629e4: the withdrawn seat's reseat skipped the check and queued
+/// (`Ok`), so A seated again after B's removal with no plate and no row to remove.
+#[test]
+fn edge_a_a_withdrawn_source_waits_for_a_newer_source_queued_ahead_of_its_reseat() {
+    let mut device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+    let u_a = host
+        .unit(0, 740, Spec::Builtin { kind: UnitKind::Synth, params: vec![] }, 0, false)
+        .expect("reserve source A");
+    u_a.activated(Activated { name: "SynthA".into(), source: true, latency: 0 });
+    let t = u_a.terms().unwrap();
+    let mut box_a = LatentUnit::new(1, 0, stops.clone());
+    box_a.source = true;
+    let op_a = ok_op(u_a.submit(box_a, t));
+    assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let op_w = u_a.withdraw().expect("withdraw A");
+    assert_eq!(host.wait_op(op_w, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    let Some(Back::Withdrawn { unit: withdrawn_a, .. }) = u_a.take_back() else { panic!("expected A withdrawn") };
+
+    device.stop();
+    let u_b = host
+        .unit(0, 741, Spec::Builtin { kind: UnitKind::Synth, params: vec![] }, 0, false)
+        .expect("reserve newer source B");
+    u_b.activated(Activated { name: "SynthB".into(), source: true, latency: 0 });
+    let mut box_b = LatentUnit::new(2, 0, stops.clone());
+    box_b.source = true;
+    let op_b = ok_op(u_b.submit(box_b, t));
+    let Removal::Sent(rem_b) = host.remove_unit(741).expect("queue B's removal") else { panic!("expected Sent") };
+
+    let kept_a = match u_a.submit(withdrawn_a, t) {
+        Ok(op) => panic!("A's reseat must not queue behind B's install and removal (got Ok({op:?}))"),
+        Err((returned, e)) => {
+            assert_eq!(format!("{e:?}"), "Behind", "A must wait for the engine's answer to B");
+            returned
+        }
+    };
+
+    let mut ev = Vec::new();
+    super::unit_host::service_if_idle(&host.core);
+    host.drain_feed(&mut ev);
+    assert_eq!(u_b.poll(op_b), OpState::Applied);
+    assert_eq!(host.wait_op(rem_b, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(matches!(u_a.take_back(), Some(Back::Dismissed)), "B taking A's seat ends A");
+    assert!(matches!(u_a.submit(kept_a, t), Err((_, SubmitError::Removing))), "an ended A never queues again");
+    super::unit_host::service_if_idle(&host.core);
+    host.drain_feed(&mut ev);
+    assert!(engine_chain_ids(&device, 0).is_empty(), "nothing seats after B's removal");
+    assert!(host.core.chain_snapshot().chains[0].units.is_empty(), "no plate stays");
+    drop(u_b.take_back());
+    u_b.release();
+    u_a.release();
+}
+
+/// Review round 2, findings 2 and 8: after a rebuild, an effect that comes back a source is judged as
+/// the engine would judge its install when it applies. Behind a seat whose removal is queued ahead of
+/// it, it takes the head (the seat is gone by then); at the head of its plates, likewise. Red on
+/// 6d629e4: the queued removal's seat still counted as ahead (`Refused(Placement)`); a host refusing
+/// every effect-turned-source fails both cases.
+#[test]
+fn edge_b_an_effect_back_as_a_source_takes_the_head_behind_a_queued_removal_or_at_the_head() {
+    for removal_ahead in [true, false] {
+        let mut device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+        let host = device.host().clone();
+        let stops = Arc::new(AtomicUsize::new(0));
+        let u_a = host.unit(0, 750, Spec::Plugin(plugin_ref("lead")), 0, false).expect("reserve A");
+        u_a.activated(Activated { name: "lead".into(), source: false, latency: 0 });
+        let op_a = ok_op(u_a.submit(LatentUnit::new(1, 0, stops.clone()), u_a.terms().unwrap()));
+        assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+        let u_e = host.unit(0, 751, Spec::Plugin(plugin_ref("fx")), 1, false).expect("reserve effect E");
+        u_e.activated(Activated { name: "fx".into(), source: false, latency: 0 });
+        let op_e = ok_op(u_e.submit(LatentUnit::new(2, 0, stops.clone()), u_e.terms().unwrap()));
+        assert_eq!(host.wait_op(op_e, Duration::from_secs(2)).unwrap(), OpState::Applied);
+        if !removal_ahead {
+            let Removal::Sent(rem) = host.remove_unit(750).unwrap() else { panic!("expected Sent") };
+            assert_eq!(host.wait_op(rem, Duration::from_secs(2)).unwrap(), OpState::Applied);
+            drop(u_a.take_back());
+        }
+
+        device.rebuild_at(96_000, 512);
+        let t2 = u_e.terms().unwrap();
+        let Back::Evicted { unit: evicted_e, .. } = u_e.take_back().expect("E evicted") else { panic!("expected Evicted for E") };
+        if removal_ahead {
+            let Back::Evicted { unit: evicted_a, .. } = u_a.take_back().expect("A evicted") else { panic!("expected Evicted for A") };
+            let op_a2 = ok_op(u_a.submit(evicted_a, t2));
+            assert_eq!(host.wait_op(op_a2, Duration::from_secs(2)).unwrap(), OpState::Applied);
+            device.stop();
+            let Removal::Sent(_) = host.remove_unit(750).expect("queue A's removal") else { panic!("expected Sent") };
+        } else {
+            device.stop();
+        }
+
+        u_e.activated(Activated { name: "fx".into(), source: true, latency: 0 });
+        let mut box_e = evicted_e.into_any().downcast::<LatentUnit>().unwrap();
+        box_e.source = true;
+        let op_e2 = match u_e.submit(box_e, t2) {
+            Ok(op) => op,
+            Err((_, e)) => panic!("E takes the head once nothing stands ahead of it (removal ahead: {removal_ahead}), got {e:?}"),
+        };
+        let mut ev = Vec::new();
+        super::unit_host::service_if_idle(&host.core);
+        host.drain_feed(&mut ev);
+        assert_eq!(u_e.poll(op_e2), OpState::Applied, "removal ahead: {removal_ahead}");
+        assert_eq!(engine_chain_ids(&device, 0), vec![(751, false)], "E heads slot 0 (removal ahead: {removal_ahead})");
+
+        if removal_ahead {
+            drop(u_a.take_back());
+        }
+        u_a.release();
+        let Removal::Sent(rem_e) = host.remove_unit(751).unwrap() else { panic!("expected Sent") };
+        super::unit_host::service_if_idle(&host.core);
+        host.drain_feed(&mut ev);
+        assert_eq!(host.wait_op(rem_e, Duration::from_secs(2)).unwrap(), OpState::Applied);
+        drop(u_e.take_back());
+        u_e.release();
+    }
+}
+
+/// Review round 2, finding 3: a source evicted by a rebuild whose re-activation reports an effect, and
+/// which the engine refuses (its latency) and its owner parks, was still the slot's source: a newer
+/// source seating ends it (`Back::Dismissed`). Red on 6d629e4: the end judged its reported role (now an
+/// effect), so A kept its owner and tone beside B.
+#[test]
+fn edge_b_a_source_parked_after_coming_back_an_effect_ends_when_a_newer_source_seats() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+    let u_a = host.unit(0, 760, Spec::Plugin(plugin_ref("synth")), 0, false).expect("reserve source A");
+    u_a.activated(Activated { name: "synth".into(), source: true, latency: 0 });
+    let mut box_a = LatentUnit::new(1, 0, stops.clone());
+    box_a.source = true;
+    let op_a = ok_op(u_a.submit(box_a, u_a.terms().unwrap()));
+    assert_eq!(host.wait_op(op_a, Duration::from_secs(2)).unwrap(), OpState::Applied);
+
+    device.rebuild_at(96_000, 512);
+    let Back::Evicted { unit: evicted_a, .. } = u_a.take_back().expect("A evicted") else { panic!("expected Evicted for A") };
+    let t2 = u_a.terms().unwrap();
+    let past = max_chain_latency(96_000) + 1;
+    u_a.activated(Activated { name: "synth".into(), source: false, latency: past });
+    let mut box_a = evicted_a.into_any().downcast::<LatentUnit>().unwrap();
+    box_a.source = false;
+    box_a.latency = past;
+    let op_a2 = ok_op(u_a.submit(box_a, t2));
+    assert_eq!(host.wait_op(op_a2, Duration::from_secs(2)).unwrap(), OpState::Refused(SeatRefusal::Latency));
+    let Some(Back::Refused { unit: parked_a, .. }) = u_a.take_back() else { panic!("expected A refused") };
+    u_a.parked("latency".into());
+
+    let u_b = host
+        .unit(0, 761, Spec::Builtin { kind: UnitKind::Synth, params: vec![] }, 0, false)
+        .expect("reserve newer source B");
+    u_b.activated(Activated { name: "SynthB".into(), source: true, latency: 0 });
+    let mut box_b = LatentUnit::new(2, 0, stops.clone());
+    box_b.source = true;
+    let op_b = ok_op(u_b.submit(box_b, t2));
+    assert_eq!(host.wait_op(op_b, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    assert!(matches!(u_a.take_back(), Some(Back::Dismissed)), "the parked older source ends once B seats");
+    assert_eq!(
+        host.core.chain_snapshot().chains[0].units.iter().map(|u| u.id).collect::<Vec<_>>(),
+        vec![761],
+        "only B's plate stays"
+    );
+    drop(parked_a);
+    u_a.release();
+    let Removal::Sent(rem_b) = host.remove_unit(761).unwrap() else { panic!("expected Sent") };
+    assert_eq!(host.wait_op(rem_b, Duration::from_secs(2)).unwrap(), OpState::Applied);
+    drop(u_b.take_back());
+    u_b.release();
+}
+
+/// Review round 2, finding 10: `submit_before` reads its deadline under the port's lock. An owner that
+/// enters before its deadline and waits on the lock past it sends nothing (`Late`). The check moved
+/// ahead of the locks would pass and push.
+#[test]
+fn edge_d_submit_before_judges_its_deadline_after_waiting_on_the_port() {
+    let device = TestDevice::start(48_000, 256, Duration::from_millis(2), |_| 0.0);
+    let host = device.host().clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+    let u = host.unit(0, 770, Spec::Plugin(plugin_ref("race")), 0, false).expect("reserve");
+    u.activated(Activated { name: "race".into(), source: false, latency: 0 });
+    let terms = u.terms().unwrap();
+    let u = Arc::new(u);
+    let port = host.core.ports[0].lock().unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let submitter = {
+        let u = u.clone();
+        let unit: Unit = LatentUnit::new(1, 0, stops);
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(100);
+            entered_tx.send(()).unwrap();
+            u.submit_before(unit, terms, deadline).map_err(|(_, e)| e).map(|_| ())
+        })
+    };
+    entered_rx.recv().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    drop(port);
+    assert_eq!(submitter.join().unwrap(), Err(SubmitError::Late));
+    assert!(engine_chain_ids(&device, 0).is_empty());
+    let u = Arc::into_inner(u).expect("one owner");
+    u.failed("late".into());
+    u.release();
 }
 
 /// [`super::unit_host::UnitHost::submit_before`] (chain host edge d's push bound): past its deadline it
