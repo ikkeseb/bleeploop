@@ -37,10 +37,10 @@ import {
   slotUnset,
   withAt,
 } from './instrument-slots';
-import { engineDevice, reportedSlotGains } from './engine-store';
+import { reportedSlotGains } from './engine-store';
 import { disarmEngineLive, disarmInputInternal, holdEngineLive, inputArmed, resumeEngineLive } from './native-io';
 import { readStoredNumber, writeStoredNumber } from './persist';
-import { forgetSlotPlugin, keepRigVolume, recallInFlight, rememberSlotPlugin, rigVolumes, savedRig, type SavedRig } from './rig-recall';
+import { forgetSlotPlugin, recallInFlight, rememberSlotPlugin, savedRig, type SavedRig } from './rig-recall';
 import { defaultPluginLevel, legacySlotVolume, SLOT_GAIN_MAX, storedSlotSource, type LegacySnapshot } from './rig-record';
 import { pluginDescriptorKey, reconcilePluginDescriptors, samePluginDescriptor } from './plugin-descriptor';
 import { appliedHead, headSynthPick, pickSynth } from './chain';
@@ -154,29 +154,18 @@ function routeEngine(i: 0 | 1): void {
 }
 
 // With the chain drawn: each slot's level after its chain (unit contract: the slot volume sits after the
-// chain), kept in the rig record (`rig-recall.ts`): read here at load (a WebView reload, a launch), set by
-// the record's restore (`adoptRigVolume`) and the slot level. With no record yet the fader shows the level
-// the upgrade derives from the old keys (`legacySlotVolume`; the restore then applies the upgrade's own), so
-// the player can set it while the upgrade waits for its scan (review r2 finding 5). No level is sent before
-// the record is known (`chainLevelKnown`: an engine keeps its own meanwhile; a migrated Off slot never passes
-// its input at unity first): a level set meanwhile lands in the record's first write, and the restore sends
-// it. An unreadable record shows none. Only chain mode reads `lf.rig`: the release never does.
-//
-// With the native rig record (`rigNative`: `platform.rig.available`, the WebView's record above unread) the
-// fader shows the player's latest gesture, else the latest reset frame's slot gain (the engine's settings
-// memory), else what `rig.open` answered, else the upgrade's level until the import answers (`showRigLevels`).
-// A gesture is a plain `SetSlotGain`, and native keeps it in the record (D2: the player's level wins over the
-// record's); a reset frame or an answer that arrives after it names an older level. The fader stays where the
-// player put it: a refused gesture goes again alone until the engine takes it or a newer gesture on the slot
-// replaces it (a batch that answers false may still have carried it into the engine: the same level twice is
-// harmless, a fader put back on a guess is not).
-const rigNative = platform.chain.available && platform.rig.available;
-const rigAtLoad = platform.chain.available && !rigNative ? rigVolumes() : null;
-const chainLevelKnown: [boolean, boolean] = Array.isArray(rigAtLoad) ? [true, true] : [false, false];
+// chain), which the native rig record keeps (`engine_io/rig/`). The fader shows the player's
+// latest gesture, else the latest reset frame's slot gain (the engine's settings memory), else what
+// `rig.open` answered, else the level the upgrade derives from the old keys (`legacySlotVolume`) until the
+// import answers (`showRigLevels`). A gesture is a plain `SetSlotGain`, and native keeps it in the record (D2:
+// the player's level wins over the record's); a reset frame or an answer that arrives after it names an older
+// level. The fader stays where the player put it: a refused gesture goes again alone until the engine takes it
+// or a newer gesture on the slot replaces it (a batch that answers false may still have carried it into the
+// engine: the same level twice is harmless, a fader put back on a guess is not).
 const [chainGains, setChainGains] = createSignal<[number | null, number | null]>(
-  rigNative || rigAtLoad === 'absent' ? upgradeLevels() : (rigAtLoad ?? [null, null]),
+  platform.chain.available ? upgradeLevels() : [null, null],
 );
-/** `rigNative`: where a fader's level comes from, lowest rank first. */
+/** Chain mode: where a fader's level comes from, lowest rank first. */
 const FROM = { upgrade: 1, answer: 2, engine: 3, gesture: 4 } as const;
 type LevelFrom = (typeof FROM)[keyof typeof FROM];
 /** Per slot, the rank the fader shows: a level from a lower rank never replaces a higher one's. */
@@ -193,7 +182,7 @@ function showLevel(slot: 0 | 1, v: number, rank: LevelFrom): void {
 export function showRigLevels(volumes: [number, number] | null, from: 'answer' | 'upgrade'): void {
   for (const slot of [0, 1] as const) showLevel(slot, volumes?.[slot] ?? 1, from === 'upgrade' ? FROM.upgrade : FROM.answer);
 }
-/** `rigNative`: the player's level on slot `slot`, a plain `SetSlotGain`, shown at once. Its batch refused (whole
+/** Chain mode: the player's level on slot `slot`, a plain `SetSlotGain`, shown at once. Its batch refused (whole
  * or partly), it goes again in a batch of its own (`sendEngineAlone`, D11's backoff) until taken, while it is the
  * slot's latest gesture. */
 function gestureLevel(slot: 0 | 1, v: number): void {
@@ -207,10 +196,6 @@ function upgradeLevels(): [number, number] {
   const { slots } = legacyRigSnapshot([], savedRig());
   return [legacySlotVolume(slots[0], guitarFirst, recallInFlight()), legacySlotVolume(slots[1], guitarFirst, recallInFlight())];
 }
-/** Per slot, who waits for its next level the engine takes (`adoptRigVolume`). */
-const levelTaken: [((took: boolean) => void)[], ((took: boolean) => void)[]] = [[], []];
-/** Per slot, the latest level send: an older one's resend stops. */
-const levelSends: [number, number] = [0, 0];
 
 /** How long a refused send goes again before it is logged, once (`resendUntilTaken`). */
 const RESEND_LOG_MS = 10_000;
@@ -219,9 +204,9 @@ const RESEND_LOG_MS = 10_000;
  * Send with `send` until the engine takes it: a refused batch (a briefly full command ring, a lost batch)
  * goes again a short backoff apart (20 ms doubling to 500 ms), while `wanted()` holds (a newer send of the
  * same thing, a new engine or no device running ends it), with no cap while it holds (review r3 finding 2:
- * an IPC that recovers on the same device lets a waiting restore go on); one log line once refused for
- * RESEND_LOG_MS. True once taken. Chain mode's rig restore waits on such sends (review r2 finding 3): the
- * slot levels here, the legacy sends' send-off in `engine-store.ts`.
+ * an IPC that recovers on the same device gets it through); one log line once refused for RESEND_LOG_MS.
+ * True once taken. Chain mode's slot level gesture here (`gestureLevel`), the legacy sends' send-off in
+ * `engine-store.ts` (D11).
  */
 export async function resendUntilTaken(what: string, send: () => Promise<boolean>, wanted: () => boolean): Promise<boolean> {
   const logAt = Date.now() + RESEND_LOG_MS;
@@ -236,29 +221,6 @@ export async function resendUntilTaken(what: string, send: () => Promise<boolean
     await new Promise((resolve) => setTimeout(resolve, wait));
     if (!wanted()) return false;
   }
-}
-
-/** Send slot `slot`'s chain-mode level (again while refused, until a newer level of the slot goes, while a
- * device runs); once the engine took it, its waiters go on with true; with no device running they settle
- * false (the restore adds nothing this launch). */
-function sendChainLevel(slot: 0 | 1, v: number): void {
-  const n = ++levelSends[slot];
-  const running = () => engineDevice() !== null;
-  void resendUntilTaken(`slot ${slot + 1}'s level`, () => sendEngine({ SetSlotGain: [slot, v] }), () => levelSends[slot] === n && running()).then((took) => {
-    if (took || !running()) levelTaken[slot].splice(0).forEach((go) => go(took));
-  });
-}
-
-/** Chain mode's restore applies slot `slot`'s kept volume: shown, and the engine's slot gain. Settles true
- * once the engine took a level of the slot (this one, resent while refused, or a later one): the restore's
- * adds wait for it, so no unit seats at another level; false when no device runs before it was taken. */
-export function adoptRigVolume(slot: 0 | 1, volume: number): Promise<boolean> {
-  const v = Math.max(0, Math.min(SLOT_GAIN_MAX, volume));
-  setChainGains((prev) => withAt(prev, slot, v));
-  chainLevelKnown[slot] = true;
-  const taken = new Promise<boolean>((go) => levelTaken[slot].push(go));
-  sendChainLevel(slot, v);
-  return taken;
 }
 
 /**
@@ -305,21 +267,13 @@ function setEngineGain(slot: 0 | 1, gain: number | null, send = true): void {
  */
 export function engineResync(first: boolean): void {
   applyActiveRouting();
-  if (rigNative) {
-    // the engine keeps the slot level natively (the rig's seed, a gesture): shown, never sent from here
+  if (platform.chain.available) {
+    // the engine keeps the slot level natively (the rig's seed, a gesture): shown, never sent from here;
+    // SYNTH's levels are its unit's params (unit contract §2, §4)
     const kept = reportedSlotGains();
     for (const slot of [0, 1] as const) {
       const v = kept[slot];
       if (v !== null) showLevel(slot, v, FROM.engine);
-    }
-    if (first) disarmEngineLive();
-    return;
-  }
-  if (platform.chain.available) {
-    // the chain's slot level after its chain; SYNTH's levels are its unit's params (unit contract §2, §4)
-    for (const slot of [0, 1] as const) {
-      const v = chainGains()[slot];
-      if (v !== null && chainLevelKnown[slot]) sendChainLevel(slot, v);
     }
     if (first) disarmEngineLive();
     return;
@@ -803,19 +757,11 @@ export function slotLevel(slot: 0 | 1): number | null {
 }
 
 /** Set slot `slot`'s level (`slotLevel`), heard and recorded; an Off slot's and a synth's are kept
- * for the next launch, and in chain mode the slot's volume in the rig record (`keepRigVolume`; with the
- * native record a plain `SetSlotGain`, which native keeps). */
+ * for the next launch, and in chain mode a plain `SetSlotGain`, which the native rig record keeps. */
 export function setSlotLevel(slot: 0 | 1, value: number): void {
   const v = Math.max(0, Math.min(SLOT_GAIN_MAX, value));
-  if (rigNative) {
-    gestureLevel(slot, v);
-    return;
-  }
   if (platform.chain.available) {
-    setChainGains((prev) => withAt(prev, slot, v));
-    keepRigVolume(slot, v);
-    // before the record is known it waits in the record's first write; the restore sends it
-    if (chainLevelKnown[slot]) sendChainLevel(slot, v);
+    gestureLevel(slot, v);
     return;
   }
   const plugin = slotPlugins()[slot];

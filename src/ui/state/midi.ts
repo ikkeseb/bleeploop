@@ -173,26 +173,9 @@ function queued<T>(what: string, call: (epoch: number) => Promise<T>): Promise<T
   return next;
 }
 
-/** The epoch the page's first subscribe answered (null before it, or when it failed). */
-let firstEpoch: Promise<number | null> | null = null;
-
-/**
- * Whether this page is the first of its launch: native MIDI starts once per launch (`engine_io/mode.rs`)
- * and numbers each subscribe from 1 (`MidiHost::subscribe`), so the page's first subscribe answering 1 is a
- * new process, more is a WebView reload of the same one. Null when that answer did not come within
- * NATIVE_WAIT_MS (unknown). The chain restore reads it to tell a crash from a reload (`rig-recall.ts`).
- */
-export function firstPageOfLaunch(): Promise<boolean | null> {
-  const first = firstEpoch;
-  if (!first) return Promise.resolve(null);
-  const known = first.then((e) => (e === null || e < 1 ? null : e === 1));
-  return Promise.race([known, new Promise<null>((resolve) => setTimeout(() => resolve(null), NATIVE_WAIT_MS))]);
-}
-
 /** Listen to native MIDI, first thing in the boot; its first events bring the state. Returns the stop. */
 export function startMidi(): () => void {
   const subscription = subscribeMidi(onEvent);
-  firstEpoch ??= subscription.epoch.then((e) => e, () => null);
   chain = pageEpoch();
   if (import.meta.env.DEV) void subscription.epoch.then((epoch) => (devMidi.epoch = epoch), () => {});
   return () => subscription.stop();

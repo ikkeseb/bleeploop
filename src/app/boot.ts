@@ -1,6 +1,5 @@
 import { initAudioDeviceSettings, refreshAndPruneDevices } from '../ui/state/audio-devices';
 import {
-  adoptRigVolume,
   availablePlugins,
   legacyRigSnapshot,
   restorePlugin,
@@ -8,9 +7,9 @@ import {
   scanForPlugins,
   showRigLevels,
 } from '../ui/state/instrument';
-import { importRig, openRig, recallChains, recallRig, savedRigPaths, type SavedRig } from '../ui/state/rig-recall';
+import { importRig, openRig, recallRig, savedRigPaths, type SavedRig } from '../ui/state/rig-recall';
 import { boundKinds } from '../ui/state/rig-record';
-import { bindingsKnown, firstPageOfLaunch } from '../ui/state/midi';
+import { bindingsKnown } from '../ui/state/midi';
 import { nativeHostReady, setNativeHostReady } from '../ui/state/instrument-slots';
 import { notifyError } from '../notify';
 import { mintUnitId, platform, type PluginDescriptor } from '../platform';
@@ -18,10 +17,8 @@ import { announceLooper, refusalText, refuseOnLane } from '../ui/looper/gates';
 import {
   engineDevice,
   holdDeviceOpens,
-  legacySendsOff,
   onEngineEvent,
   openEngineDevice,
-  reportedSlotGains,
   restoreEngineShare,
   startEngineStore,
   storedInputSends,
@@ -39,17 +36,12 @@ import { autosave } from '../session/autosave';
  * last run (`rig-recall.ts`) from a scan of those plugins' own paths, and meanwhile scans every
  * installed CLAP/VST3/VST2 plugin for the slot picker, whose new or updated bundles may each take a scan
  * child up to 20 s that the saved amp-sim no longer waits for. In chain mode (`platform.chain.available`)
- * the recall is the rig record's (`recallChains`), with or without a plugin host: the upgrade of a v0.8.9
- * profile on its first run, then the restore of each chain unit the reset frame's `chains` lack, from the
- * same scan of their paths (the native host keeps its chains across a WebView reload, so a reload adds
- * nothing; native MIDI's epoch tells a reload from a new launch, `firstPageOfLaunch`). With the native rig
- * record (`platform.rig.available`, every native chain-mode page) none of that runs: the page opens the
- * record first, and no device opens before that open settled (`openRig`, `holdDeviceOpens`; a failure never
- * stops the audio boot), and only when native has none, once the device and the plugin host run, scans the
- * legacy recall's plugins, upgrades the old keys and imports the result once while the device still runs
- * (`importRig`); the restore is native's. So a
- * launch whose device does not open never recalls the rig, and cannot forget it on the loads that
- * would fail. The browser build has no engine (unless a DEV probe forces the fake on): it boots nothing
+ * the rig record, its restore and its crash marker are the native host's (`platform.rig.available`, every
+ * native chain-mode page): the page opens the record first, and no device opens before that open settled
+ * (`openRig`, `holdDeviceOpens`; a failure never stops the audio boot), and only when native has none, once
+ * the device and the plugin host run (if there is one), scans the legacy recall's plugins, upgrades the old
+ * keys and imports the result once while the device still runs (`importRig`). So a launch whose device does
+ * not open never recalls the rig, and cannot forget it on the loads that would fail. The browser build has no engine (unless a DEV probe forces the fake on): it boots nothing
  * and stays silent. Returns the dispose fn.
  */
 export function bootEngine(): () => void {
@@ -83,10 +75,9 @@ export function bootEngine(): () => void {
       restoreEngineShare();
       stopAutosave = autosave.start(session);
       if (platform.chain.available) {
-        // The rig record's recall instead of legacy `recallRig`, on every chain-mode launch: a SYNTH or an
-        // empty rig needs no plugin host. With one, the full scan fills the `+` picker meanwhile and the
-        // restore (or the upgrade) scans its plugins' own paths; without one, a plugin unit is kept in the
-        // record, not added. With the native record, its handover; the WebView's recall stays out.
+        // The native record's handover instead of legacy `recallRig`, on every chain-mode launch: a SYNTH or
+        // an empty rig needs no plugin host. With one, the full scan fills the `+` picker meanwhile and the
+        // upgrade scans the legacy plugins' own paths; without one, a plugin unit goes over unscanned.
         const host = platform.pluginHost.available;
         if (host) {
           await platform.pluginHost.init();
@@ -108,19 +99,9 @@ export function bootEngine(): () => void {
           bound: boundKinds(await bindingsKnown()),
         });
         const ready = () => engineDevice() !== null && (!host || nativeHostReady());
-        const restored = rigNative
-          ? importRig(opened, { levels: showRigLevels, scan, snapshot: legacy, mint: mintUnitId, ready })
-          : recallChains({
-              scan,
-              snapshot: async (found, saved) => ({ ...(await legacy(found, saved)), reportedVolumes: reportedSlotGains() }),
-              setVolume: adoptRigVolume,
-              sendsOff: legacySendsOff,
-              firstPage: firstPageOfLaunch,
-              add: (slot, unit, spec, at) => platform.chain.add(slot, unit, spec, at),
-              mint: mintUnitId,
-            });
+        const handedOver = importRig(opened, { levels: showRigLevels, scan, snapshot: legacy, mint: mintUnitId, ready });
         await full;
-        await restored;
+        await handedOver;
         return;
       }
       if (!platform.pluginHost.available) return;
