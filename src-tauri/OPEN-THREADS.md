@@ -189,6 +189,34 @@
   engine-side fence (the command carrying its install, or a removal dropping its id's queued commands).
   Next check: a test that queues a command for a later frame, removes the unit and re-adds one under
   the same id before that frame.
+- A plugin add's first push has no bound of its own (DEV chain mode, read from source, never run; found
+  settling the chain host edges): its call answers `Unanswered` after `LOAD_TIMEOUT` twice and releases
+  the slot's order, while an owner held up before that push (a rebuild between its load and its claim
+  makes it re-activate the plugin first, `host/unit_owner.rs` `submit_owed`) still pushes afterwards, so a
+  later edit on the slot can enter the port first. A built-in's first push is bounded under the port lock
+  (`UnitHost::submit_before`, counted from where its caller's wait starts); a plugin's could take the
+  same bound. Next check: a
+  `chain_cmds_tests.rs` test whose fake plugin's re-activation (gated, as the edge tests do) outlasts the
+  add's two waits, then a move on that slot: read which entered the port first.
+- A source whose role flips across a re-activation can still leave a slot with no playable source (DEV
+  chain mode, read from source by the edges review's third round, never run; the edges rounds stopped
+  there). (a) A plain `Withdraw(A)` whose box reaches the owner before the model reads the withdrawal: with
+  `Install(B, replaces A)` and `Remove(B)` already queued and A back as an effect, A skips both `Behind`
+  checks (`unit_host.rs` ~:1572) and can seat after B with no plate to remove it from. (b) A withdrawn
+  source back as an effect, refused on latency and parked: `head_source_id` (`chain.rs` ~:170) reads the
+  reported role, so a new source B is sent without `replaces: A` and the engine refuses it `Placement`;
+  after a rebuild, an A whose effect reseat is still queued when B seats is skipped by the role filter
+  (`chain.rs` ~:967) and keeps its owner and tone. (c) An effect E added before source A, which took the
+  head: after a rebuild A seats first with a `Remove` queued; `live_plate_ahead` skips A but
+  `newer_source` (`chain.rs` ~:441) still counts it, so E parks `Placement` and the slot loses both
+  sources when A goes. Also: a late `Seat` answer can make a move or remove answer `PortFull` with room in
+  the port. Tests that would not catch a wrong fix: the claim tests never try free places equal to the
+  claims (`<` for `<=` passes); the `Waiting` claim test can pass with the claim given only to
+  `ever_seated` owners (force `Unsent`; a CI stall past the 200 ms lease makes it falsely red); the
+  owner's queued-removal test can remove A before E's reseat; the first-push deadline tests hold only the
+  port lock; the no-waiter refusal test injects `Unanswered` instead of timing a `Waiting` caller out.
+  Next check: one `chain_tests.rs` test per edge (a)-(c) on `TestDevice` with the role flip scripted,
+  each reading the engine's chain and the plates after the last removal; then the test gaps above.
 - `tauriChainHost`'s per-slot queue (`src/platform/host.tauri.ts` `onChainSlot`) waits for each call to
   settle, so a remove or reload held across a take keeps the slot's later calls waiting until the take
   ends, while the native order mutex was already released at `waiting` (`chain_cmds.rs`
@@ -198,18 +226,6 @@
   accepts the add), so it can run ahead of a later add queued on that slot. Next check: a probe that
   queues an add behind a held remove during a take and times the add, then one that removes a loading
   unit with a second add queued behind it.
-- Chain host edges to settle before chains reach players (a cross-family review of the chain
-  commands, read from source, none reproduced; the chain host runs only in DEV builds today):
-  a) an evicted source that answers `Replaced` (a newer source queued after a rebuild) retires its tone
-  before the engine has taken the newer one, which the engine can still refuse (latency), leaving the
-  slot with neither; b) a source parked after a failed reactivation is not replaced by a newer source
-  that seats while it is out (the projected head omits it), so it keeps its owner and tone until it
-  retries; c) a plugin owner retrying `PortFull`
-  after its add's command returned can lose its place to a later edit on that slot; d) a built-in add
-  answered `waiting` whose box a rebuild returns after the 10 s first-answer bound is dropped instead of
-  offered to the new engine; e) a reload the engine refused can log a generic cause when its row is
-  released before the waiter polls. Sources and built-in factories arrive with E3. Next check: one
-  `chain_tests.rs`/`chain_cmds_tests.rs` test per letter, red first, before chains reach players.
 - Two `chain_tests.rs` tests are `#[ignore]`d (quarantined): `held_remove_outlives_remove_timeout` and
   `legacy_install_during_take_returns_within_settle_seats_on_end_and_surfaces_refusal`. On CI's Windows
   runner (`rust-test`) their `start_take` never sees lane 0 recording, even with `test_rig::PATIENCE`

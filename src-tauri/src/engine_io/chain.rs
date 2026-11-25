@@ -68,6 +68,10 @@ pub(crate) struct Plate {
     pub(crate) added_rev: u64,
     /// The first feed frame `seq` that carried this plate (`EngineHost::told`, reload's `since`).
     pub(crate) told_seq: Option<u64>,
+    /// The role its last applied install seated it in (`Some(true)`: a source); `None` before any.
+    /// An effect that comes back a source behind another seat is refused its place
+    /// (`UnitHost::submit`), and never counts as an older source for a newer one to end.
+    pub(crate) seated_source: Option<bool>,
     /// Reload candidate's pending plugin ref and activation info until its install applies.
     pub(crate) reload_plugin: Option<PluginRef>,
     pub(crate) reload_activated: Option<Activated>,
@@ -431,6 +435,52 @@ impl Model {
             .map(|(id, _)| id)
     }
 
+    /// A source of `slot` newer than `id` (by its plate's `added_rev`): `Some(true)` when one is seated
+    /// in this engine (its install applied as a source), `Some(false)` when one's install is still in
+    /// the queue, unanswered or held, whatever is queued behind it. `None`: `id` may go to the head.
+    pub(crate) fn newer_source(&self, slot: usize, id: UnitId) -> Option<bool> {
+        let sm = &self.slots[slot];
+        let rev = sm.plates[sm.find(id)?].added_rev;
+        let newer = |other: UnitId| other != id && sm.find(other).is_some_and(|i| sm.plates[i].added_rev > rev);
+        if sm.plates.iter().any(|p| p.seated_in_engine && p.seated_source == Some(true) && !p.legacy && newer(p.id)) {
+            return Some(true);
+        }
+        sm.pending
+            .iter()
+            .any(|p| matches!(p.kind, PendingKind::Install { source: true, is_reload: false, .. }) && newer(p.unit))
+            .then_some(false)
+    }
+
+    /// Whether a plate that holds or awaits a seat stands ahead of `id` in `slot`'s plate order: one
+    /// seated in this engine, or one whose owner still holds its unit (out after a rebuild, parked or
+    /// reseating, which a rebuild leaves `failed` with no seat). A failed add (its id freed) holds none,
+    /// nor does one whose removal is queued: it is gone before an install pushed now is judged.
+    pub(crate) fn live_plate_ahead(&self, slot: usize, id: UnitId, table: &Table) -> bool {
+        let sm = &self.slots[slot];
+        let leaving = |p: &Plate| {
+            sm.pending.iter().any(|q| q.unit == p.id && matches!(q.kind, PendingKind::Remove { .. }))
+        };
+        sm.find(id).is_some_and(|pos| {
+            sm.plates[..pos]
+                .iter()
+                .any(|p| (p.seated_in_engine || table.has_active_row(p.id)) && !leaving(p))
+        })
+    }
+
+    /// Whether an install queued in `slot` takes `id`'s seat (`replaces: Some(id)`, another id's: a
+    /// newer source taking the head) and the engine has not answered it yet.
+    pub(crate) fn seat_taken_by_queued_install(&self, slot: usize, id: UnitId) -> bool {
+        self.slots[slot].pending.iter().any(|p| {
+            p.unit != id && matches!(p.kind, PendingKind::Install { replaces: Some(r), is_reload: false, .. } if r == id)
+        })
+    }
+
+    /// The messages pushed on `slot`'s port whose answer the model has not taken yet: never fewer than
+    /// the port holds ([`super::unit_host::Table::port_claimed_ahead`]).
+    pub(crate) fn queued(&self, slot: usize) -> usize {
+        self.slots[slot].pending.len()
+    }
+
     /// Whether `slot` has any head source plate (even loading/reseating) for capacity check.
     pub(crate) fn has_head_source_plate(&self, slot: usize) -> bool {
         self.slots[slot]
@@ -480,6 +530,7 @@ impl Model {
                 reseating_since: None,
                 added_rev,
                 told_seq: None,
+                seated_source: None,
                 reload_plugin: None,
                 reload_activated: None,
             },
@@ -729,7 +780,7 @@ impl Model {
                 self.record_settled(table, head.op, OpState::Applied);
                 let mut rev_bump = false;
                 match head.kind {
-                    PendingKind::Install { token, is_reload, replaces, .. } => {
+                    PendingKind::Install { token, is_reload, replaces, source, .. } => {
                         table.mark_seated(token, gen);
                         if is_reload {
                             table.promote_reload(token);
@@ -764,12 +815,19 @@ impl Model {
                                 plate.state = PlateState::Seated;
                             }
                             plate.seated_in_engine = true;
+                            plate.seated_source = Some(plate.source);
                             plate.withdrawn = false;
                             plate.parked = false;
                             plate.held = false;
                             plate.error = None;
                             plate.reseating_since = None;
                             rev_bump |= !plate.legacy;
+                        }
+                        if source && !is_reload {
+                            for old_id in self.take_older_sources_out_of_engine(s, unit, table) {
+                                table.finish_replaced(old_id);
+                                rev_bump = true;
+                            }
                         }
                     }
                     PendingKind::Remove { owner_token } => {
@@ -894,6 +952,40 @@ impl Model {
         }
     }
 
+    /// Source `unit`'s install applied at the head of `slot` (answered by its `Seat`, or found applied
+    /// by a rebuild's handoff): take the plates of every older source of that slot whose seat is out of
+    /// this engine (evicted and not back yet, or parked after a failed re-activation) and return their
+    /// ids for the caller to end as a replacement would (`Table::finish_replaced`: `Back::Dismissed`,
+    /// the tone retires). The engine holds no seat of theirs for the install to name in `replaces`, so
+    /// without this each kept its owner and tone until its retry found the newer head. Nothing ends one
+    /// earlier: a newer source the engine refuses costs the older one nothing (its retry meanwhile
+    /// answers `Behind`, `UnitHost::submit`, so it never has an install queued behind the newer one's).
+    /// One with an op still queued is leaving or seated and is left to that op; a failed add (its id
+    /// freed) is the player's to remove. Each is judged by the role it last seated in (its reported one
+    /// if it never seated): an effect parked for coming back a source was never the slot's source, and
+    /// a source parked for coming back an effect (refused, say, for its latency) still was.
+    fn take_older_sources_out_of_engine(&mut self, slot: usize, unit: UnitId, table: &Table) -> Vec<UnitId> {
+        let sm = &self.slots[slot];
+        let Some(rev) = sm.find(unit).map(|i| sm.plates[i].added_rev) else { return Vec::new() };
+        let older: Vec<UnitId> = sm
+            .plates
+            .iter()
+            .filter(|p| {
+                p.seated_source.unwrap_or(p.source)
+                    && p.id != unit
+                    && !p.legacy
+                    && !p.seated_in_engine
+                    && p.state != PlateState::Leaving
+                    && p.added_rev < rev
+                    && table.has_active_row(p.id)
+                    && !sm.pending.iter().any(|q| q.unit == p.id)
+            })
+            .map(|p| p.id)
+            .collect();
+        self.slots[slot].plates.retain(|p| !older.contains(&p.id));
+        older
+    }
+
     /// Project an `Event::Chain` (or a snapshot read off `Engine::chain`) into the model.
     pub(crate) fn on_chain(&mut self, gen: u64, slot: u8, seats: &[ChainSeat]) {
         if gen != self.generation {
@@ -990,6 +1082,8 @@ impl Model {
         now: Instant,
     ) {
         let now = self.now(now);
+        // The ports are replaced with the engine: no install waits for room on one any more.
+        table.clear_port_claims();
         // Index returned boxes by each row's latest install op for pending-op settling.
         let ret_info: BTreeMap<u64, (Left, bool)> = returned
             .iter()
@@ -1086,11 +1180,20 @@ impl Model {
                                     }
                                     plate.bypass = bypassed;
                                     plate.seated_in_engine = true;
+                                    plate.seated_source = Some(plate.source);
                                     plate.withdrawn = false;
                                     plate.parked = false;
                                     plate.held = false;
                                     plate.error = None;
                                     rev_bump |= !plate.legacy;
+                                }
+                                // The old engine applied it (its idle service, before the eviction):
+                                // it seated, as an answered install does, and ends what that ends, once
+                                // the returned boxes are filed (below).
+                                if source && !is_reload {
+                                    let older = self.take_older_sources_out_of_engine(s, head.unit, table);
+                                    rev_bump |= !older.is_empty();
+                                    replaced_other_ids.extend(older);
                                 }
                             }
                         }

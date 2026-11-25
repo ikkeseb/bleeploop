@@ -50,8 +50,11 @@ const BUILTIN_POLL: Duration = Duration::from_millis(20);
 /// How long a built-in add waits for its owner thread's first answer (`Seated`, `Waiting`, or `Err`).
 const BUILTIN_ADD_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Bound for an initial built-in submit retrying `Stale`/`Reloading` before failing cleanly; strictly
+/// Bound for an initial built-in submit retrying `Stale`/`Reloading`/`Behind` before failing cleanly,
+/// while its caller still waits for the first answer, counted from where that wait starts; strictly
 /// below `BUILTIN_ADD_TIMEOUT` so the owner always exits and answers before the caller releases order.
+/// Judged under the port's lock at every push, the first included (`UnitHost::submit_before`), so no
+/// install of a first answer still owed enters after it.
 const BUILTIN_INITIAL_SUBMIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Bound for stopping/joining a late entry that finished opening after `join_all` already completed.
@@ -307,6 +310,9 @@ struct PendingReload {
     plugin: PluginRef,
     inst: u64,
     owner: UnitOwner,
+    /// Its `reload` call still waits on it (`Answer::Waiting`) and reads its outcome itself: a sweep that
+    /// retires it first leaves the refusal's cause to that call (`Table::forget_reload_refusal`).
+    waiter: bool,
 }
 
 struct BuiltinOwner {
@@ -445,8 +451,11 @@ impl Chains {
                         let _ = self.promote_pending_reload(unit, inst, candidate_token);
                     }
                     ReloadOutcome::Failed(why) => {
-                        if self.retire_pending_reload(inst) {
+                        if let Some(waiter) = self.retire_pending_reload(inst) {
                             log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {why}");
+                            if !waiter {
+                                forget_reload_refusal(host, candidate_token);
+                            }
                         }
                     }
                 }
@@ -605,14 +614,17 @@ impl Chains {
         aborted
     }
 
-    fn retire_pending_reload(&self, inst: u64) -> bool {
+    /// Retire pending reload `inst` to `gone`: `Some(waiter)` (whether its call still waits on it, see
+    /// [`PendingReload::waiter`]) if this call took it, `None` if another already had.
+    fn retire_pending_reload(&self, inst: u64) -> Option<bool> {
         let (retired, late_entry) = {
             let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
             let mut gone = self.gone.lock().unwrap_or_else(|e| e.into_inner());
             let Some(pos) = pending.iter().position(|c| c.inst == inst) else {
-                return false;
+                return None;
             };
             let cand = pending.swap_remove(pos);
+            let waiter = cand.waiter;
             let entry = Arc::new(Entry {
                 slot: cand.slot,
                 token: 0,
@@ -622,12 +634,25 @@ impl Chains {
                     owner: cand.owner,
                 }),
             });
-            (true, Self::push_gone_locked(&mut gone, entry))
+            (Some(waiter), Self::push_gone_locked(&mut gone, entry))
         };
         if let Some(late) = late_entry {
             self.dispose_late_entry(late);
         }
         retired
+    }
+
+    /// The `reload` call waiting on pending reload `inst` stops waiting with it still standing: a sweep
+    /// reads its outcome from now on. False if a sweep already took it (and left its cause to this call).
+    fn leave_pending_reload_to_sweep(&self, inst: u64) -> bool {
+        let mut pending = self.pending_reloads.lock().unwrap_or_else(|e| e.into_inner());
+        match pending.iter_mut().find(|c| c.inst == inst) {
+            Some(cand) => {
+                cand.waiter = false;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Move `unit`'s registry entry to `gone` if it still matches `token` (or any entry if `None`),
@@ -921,7 +946,7 @@ impl Chains {
         // Spawn the owner BEFORE submitting to the engine; hand `(unit_host, boxed, terms)` across
         // only AFTER registering in `self.registry` so spawn failure cleanly drops/releases and
         // shutdown can never snapshot `registry` after `submit()` has handed the box to the engine.
-        let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<(UnitHost, Unit, unit_host::Terms)>(1);
+        let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<(UnitHost, Unit, unit_host::Terms, Instant)>(1);
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<Added, String>>(1);
         let stop = Arc::new(AtomicBool::new(false));
         let wake = Arc::new((Mutex::new(()), Condvar::new()));
@@ -1007,7 +1032,9 @@ impl Chains {
             return Err(msg);
         }
 
-        if let Err(std::sync::mpsc::SendError((unit_host, boxed, _))) = start_tx.send((unit_host, boxed, terms)) {
+        // The caller's wait starts here, and the owner's first-answer bound with it.
+        let asked = Instant::now();
+        if let Err(std::sync::mpsc::SendError((unit_host, boxed, _, _))) = start_tx.send((unit_host, boxed, terms, asked)) {
             drop(boxed);
             let why = format!("built-in unit {unit} owner exited before starting");
             unit_host.failed(why.clone());
@@ -1016,7 +1043,7 @@ impl Chains {
             return Err(why);
         }
 
-        match ready_rx.recv_timeout(BUILTIN_ADD_TIMEOUT) {
+        match ready_rx.recv_timeout(BUILTIN_ADD_TIMEOUT.saturating_sub(asked.elapsed())) {
             Ok(Ok(added)) => Ok(added),
             Ok(Err(why)) => {
                 self.retire_to_gone(unit, Some(token));
@@ -1331,6 +1358,8 @@ impl Chains {
         let inst = self.affinity.lock().unwrap_or_else(|e| e.into_inner()).claim(&plugin.path);
         match open(format, &plugin, unit_host, sink, Some(binding)) {
             Err(e) => {
+                // The candidate's owner released it before answering: no outcome is read after this.
+                forget_reload_refusal(host, new_token);
                 {
                     let mut aff = self.affinity.lock().unwrap_or_else(|e| e.into_inner());
                     if e == SETUP_TIMEOUT_ERR {
@@ -1398,6 +1427,7 @@ impl Chains {
                             plugin,
                             inst,
                             owner,
+                            waiter: true,
                         });
                         (false, None)
                     }
@@ -1407,6 +1437,7 @@ impl Chains {
                     if let Some(late) = late_entry {
                         self.dispose_late_entry(late);
                     }
+                    forget_reload_refusal(host, new_token);
                     return Err("the host is closing".to_string());
                 }
                 drop(order);
@@ -1429,14 +1460,18 @@ impl Chains {
                             return Ok(Reloaded::Reloaded);
                         }
                         ReloadOutcome::Failed(why) => {
+                            // This call answers the failure, so it logs its cause, whoever retired the
+                            // candidate: a sweep that got there first left the cause for this read.
                             self.retire_pending_reload(inst);
                             log::warn!("[chain_cmds] slot {slot} unit {unit} reload failed: {why}");
+                            forget_reload_refusal(host, new_token);
                             return Ok(Reloaded::Failed);
                         }
                         ReloadOutcome::Standing => {}
                     }
                     if self.closing.load(Acquire) || host.core.closing.load(Acquire) {
                         self.retire_pending_reload(inst);
+                        forget_reload_refusal(host, new_token);
                         log::warn!(
                             "[chain_cmds] slot {slot} unit {unit} reload interrupted by shutdown"
                         );
@@ -1452,6 +1487,9 @@ impl Chains {
                     if !slot_held {
                         unheld += dt;
                         if unheld >= RELOAD_WAIT_TIMEOUT {
+                            if !self.leave_pending_reload_to_sweep(inst) {
+                                forget_reload_refusal(host, new_token);
+                            }
                             return Err(format!(
                                 "unit {unit} reload did not settle within {} s",
                                 RELOAD_WAIT_TIMEOUT.as_secs()
@@ -1486,6 +1524,7 @@ impl Chains {
                             plugin,
                             inst,
                             owner,
+                            waiter: false,
                         });
                         (false, None)
                     }
@@ -1495,6 +1534,7 @@ impl Chains {
                     if let Some(late) = late_entry {
                         self.dispose_late_entry(late);
                     }
+                    forget_reload_refusal(host, new_token);
                     return Err("the host is closing".to_string());
                 }
                 Err(format!(
@@ -1736,7 +1776,11 @@ fn reload_outcome(
     if state.table.active_row_for_id(unit).is_some_and(|r| r.token == candidate) {
         return ReloadOutcome::Reloaded;
     }
-    let why = if let Some(row) = state.table.row(candidate) {
+    // The refusal is read from the table's own record first: the candidate's owner may have released
+    // its row (and with it `settled`) before this poll.
+    let why = if let Some(why) = state.table.reload_refusal(candidate) {
+        format!("engine refused reload: {}", refusal_reason(why))
+    } else if let Some(row) = state.table.row(candidate) {
         if let Some(why) = row.settled.values().find_map(|s| match s {
             OpState::Refused(why) => Some(*why),
             _ => None,
@@ -1759,6 +1803,13 @@ fn reload_outcome(
         describe_missing_reload_cause(&state, unit, old, candidate)
     };
     ReloadOutcome::Failed(why)
+}
+
+/// The reload of `candidate` has no reader left (`Table::forget_reload_refusal`): its call returned
+/// without leaving it to the sweep, or the one that retired it logged its cause.
+fn forget_reload_refusal(host: &EngineHost, candidate: InstallToken) {
+    let mut state = host.core.state.lock().unwrap_or_else(|e| e.into_inner());
+    state.table.forget_reload_refusal(candidate);
 }
 
 fn describe_missing_reload_cause(
@@ -1913,6 +1964,9 @@ fn submit_error_reason(err: SubmitError) -> String {
         SubmitError::PortFull => "the slot's engine port is full".to_string(),
         SubmitError::Superseded => "the unit was superseded before seating".to_string(),
         SubmitError::Replaced => "a newer source replaced this unit".to_string(),
+        SubmitError::Behind => "a newer source is queued ahead of this unit".to_string(),
+        SubmitError::Refused(why) => refusal_reason(why),
+        SubmitError::Late => "built-in unit could not submit before timeout".to_string(),
         SubmitError::Removing => "the unit is being removed".to_string(),
         SubmitError::Reloading => "the unit is reloading".to_string(),
         SubmitError::Closing => "the audio host is closing".to_string(),
@@ -1980,23 +2034,26 @@ impl Rebuild {
 /// or a failed rebuild, drops the box off the RT thread on terminal return, and drains/abandons
 /// cleanly on stop.
 fn serve_builtin(
-    start_rx: std::sync::mpsc::Receiver<(UnitHost, Unit, unit_host::Terms)>,
+    start_rx: std::sync::mpsc::Receiver<(UnitHost, Unit, unit_host::Terms, Instant)>,
     ready_tx: SyncSender<Result<Added, String>>,
     stop: Arc<AtomicBool>,
     wake: Arc<(Mutex<()>, Condvar)>,
     rebuild: Rebuild,
 ) {
-    let Ok((host, boxed, initial_terms)) = start_rx.recv() else {
+    let Ok((host, boxed, initial_terms, asked)) = start_rx.recv() else {
         return;
     };
     let mut built_rate = initial_terms.rate;
     let mut ready = Some(ready_tx);
     let mut ever_seated = false;
-    let initial_deadline = Instant::now() + BUILTIN_INITIAL_SUBMIT_TIMEOUT;
+    // Counted from where the caller's wait started, not from this thread's start.
+    let initial_deadline = asked + BUILTIN_INITIAL_SUBMIT_TIMEOUT;
 
-    let mut seat = match host.submit(boxed, initial_terms) {
+    // Bounded like every push while the first answer is owed: delayed on the way (the port's lock),
+    // it sends nothing once its caller may have stopped waiting.
+    let mut seat = match host.submit_before(boxed, initial_terms, initial_deadline) {
         Ok(op) => BuiltinSeat::Installing { op },
-        Err((returned, SubmitError::Stale | SubmitError::Reloading)) => BuiltinSeat::Owed { unit: returned },
+        Err((returned, SubmitError::Stale | SubmitError::Reloading | SubmitError::Behind)) => BuiltinSeat::Owed { unit: returned },
         Err((returned, SubmitError::Closing)) => {
             drop(returned);
             host.release();
@@ -2004,7 +2061,7 @@ fn serve_builtin(
             return;
         }
         Err((returned, err)) => {
-            // PortFull, NoEngine, Removing, Superseded on initial submit: fail immediately so the
+            // PortFull, NoEngine, Removing, Superseded, Late on initial submit: fail immediately so the
             // caller releases the slot's order mutex and no background retry can enqueue out of order.
             drop(returned);
             let why = submit_error_reason(err);
@@ -2062,7 +2119,11 @@ fn serve_builtin(
 
         if matches!(seat, BuiltinSeat::Owed { .. }) {
             let unit = seat.take_unit().expect("checked Owed");
-            if !ever_seated && Instant::now() >= initial_deadline {
+            // Only an add still owed its first answer fails fast: one answered `Waiting` was accepted
+            // (its caller moved on), so a box a rebuild returns is offered to the new engine like a
+            // seated one's, whenever that comes; a full port there keeps its place (`UnitHost::submit`).
+            let answering = ready.is_some();
+            if !ever_seated && answering && Instant::now() >= initial_deadline {
                 drop(unit);
                 let why = "built-in unit could not submit before timeout".to_string();
                 host.failed(why.clone());
@@ -2097,7 +2158,7 @@ fn serve_builtin(
             };
             match terms {
                 None => {
-                    if !ever_seated {
+                    if !ever_seated && answering {
                         drop(unit);
                         let why = "no audio device is open".to_string();
                         host.failed(why.clone());
@@ -2107,11 +2168,38 @@ fn serve_builtin(
                     }
                     seat = BuiltinSeat::Owed { unit };
                 }
-                Some(terms) => match host.submit(unit, terms) {
+                // While the first answer is owed the bound is judged where the push happens, under the
+                // port's lock: an owner delayed on its way here (the lock, the box built again above)
+                // never sends once its caller may have stopped waiting and released the slot's order.
+                Some(terms) => match if !ever_seated && answering {
+                    host.submit_before(unit, terms, initial_deadline)
+                } else {
+                    host.submit(unit, terms)
+                } {
                     Ok(op) => {
                         seat = BuiltinSeat::Installing { op };
                     }
-                    Err((returned, SubmitError::PortFull | SubmitError::NoEngine)) if !ever_seated => {
+                    Err((returned, err @ SubmitError::Late)) => {
+                        drop(returned);
+                        let why = submit_error_reason(err);
+                        host.failed(why.clone());
+                        host.release();
+                        send_first_answer(&mut ready, Err(why));
+                        return;
+                    }
+                    Err((returned, SubmitError::Refused(why))) => {
+                        let msg = refusal_reason(why);
+                        if !ever_seated {
+                            drop(returned);
+                            host.failed(msg.clone());
+                            host.release();
+                            send_first_answer(&mut ready, Err(msg));
+                            return;
+                        }
+                        host.parked(msg);
+                        seat = BuiltinSeat::Parked { unit: returned };
+                    }
+                    Err((returned, SubmitError::PortFull | SubmitError::NoEngine)) if !ever_seated && answering => {
                         drop(returned);
                         let why = "the slot's engine port is full".to_string();
                         host.failed(why.clone());
@@ -2119,7 +2207,7 @@ fn serve_builtin(
                         send_first_answer(&mut ready, Err(why));
                         return;
                     }
-                    Err((returned, SubmitError::Stale | SubmitError::NoEngine | SubmitError::PortFull | SubmitError::Reloading)) => {
+                    Err((returned, SubmitError::Stale | SubmitError::NoEngine | SubmitError::PortFull | SubmitError::Reloading | SubmitError::Behind)) => {
                         seat = BuiltinSeat::Owed { unit: returned };
                     }
                     Err((returned, SubmitError::Removing)) => {
