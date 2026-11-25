@@ -18,14 +18,18 @@
 //! `closing` before it takes its copy, which every later write checks under `disk`: a tick that took
 //! its view before close's copy and reaches `disk` after it writes nothing. The import checks its
 //! page's epoch again under `disk` right before its commit: a page replaced meanwhile stores nothing.
+//! A `host_init` after that check, while the commit writes, is let through on purpose: any
+//! check-then-write keeps that window unless `host_init` took `disk`, and an old page's import is the
+//! same upgrade of the same legacy keys, so the new page's `present` answers the right content.
 //!
 //! **Close** ([`Rig::close`], D7) decides under `disk` whether it writes: the store's status there,
 //! not `inner`'s copy, which an import or a first open that committed may not have published yet (close
-//! takes the store's record and publishes it). Before its copy it waits, bounded, for one completed feed
-//! pass, so an install or a parameter the engine applied and the event ring still holds reaches the
-//! model first; it never drains the feed itself. A second close (the updater's shutdown, then the
-//! exit's) returns only once the first has written and released the lock file, and does nothing. Once
-//! `closing` is set no open opens or reads the file.
+//! takes the store's record and publishes it). Before its copy it waits, bounded, for two completed
+//! feed passes, so an install or a parameter the engine applied and the event ring still holds (or held
+//! back for a full ring) reaches the model first; it never drains the feed itself. Once `closing` is
+//! set no tick changes the plan (checked under `inner`), so close judges it at its own view, and no
+//! open opens or reads the file. A second close (the updater's shutdown, then the exit's) returns only
+//! once the first has written and released the lock file, and does nothing.
 //!
 //! **Restore then project, same view (CP3a).** Once the restore runs, each tick feeds
 //! `Restore::handle(ViewChanged)` and `project` the same fresh `rig_view`, the restore first, so the two
@@ -36,6 +40,12 @@
 //! place, so the writer keeps every record unit the model lacks instead of writing them away, and adds
 //! what the player applies. Each projection first drops the ids the plan's rule ends at that view
 //! ([`end_ids`]); close judges them at its full view before it drops the `Leaving` plates.
+//!
+//! **What CP3a's plan must cover** (`held_plan` leaves both open): the plan is made by the first call
+//! that sees a record, so a close (or an open) that makes it before the import's own `keep` judges an
+//! adopted unit the player has removed meanwhile as `Held` and writes it back; and a record id held
+//! with no plate, which the player's unit takes, applies and leaves between two views, comes back from
+//! the plan, since no view showed that plate.
 //!
 //! **Locks.** `inner` (the plan, the stored record's copy the projection reads, the notice) and `disk`
 //! (the store, so one write at a time, and `closed`, the done flag a second close waits on). Neither is

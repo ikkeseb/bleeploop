@@ -43,13 +43,15 @@ from the unit to the chain. The lanes' FX, reverb bus, click, limiter and Share 
   the file pair (a lock file); another answers `unavailable`. Only a missing file is no record; one that
   cannot be read or that a newer build wrote is reported, never written over, and nothing is restored or
   written that launch (the crash marker included). A write commits when it is synced and renamed; a failed
-  one is retried. The record is a projection of the chain model: each unit the engine applied (until its
+  one is retried at the writer's next tick. The record is a projection of the chain model: each unit the engine applied (until its
   removal is confirmed) and each record unit the restore still holds (until the restore is wired, each
   record unit the chain lacks), at its place, each id once (a unit the player added under a held unit's id wins it once applied); `volume` is
   the slot gain the settings memory keeps, else the record's. A fresh add enters once applied. The shutdown
   first closes the rig: it takes the chain and the levels as they stand, keeps what the restore had not
-  finished at its place, and writes nothing after.
-  Its crash marker, `rig-inflight.json`, names each plugin unit whose load the native restore issued and
+  finished at its place, leaves out a unit whose removal is under way (before that removal is confirmed),
+  and writes nothing after. A failed last write at close is logged, not retried: the file keeps the last
+  record stored.
+  Its crash marker (the restore's flow, not wired yet), `rig-inflight.json`, names each plugin unit whose load the native restore issued and
   that is not yet known to have seated (and settled) or failed with its owner gone; written before the
   restore's first add and before each plugin load, and rewritten as soon as a load ends. A plugin whose
   own load failed leaves it only after the record without that unit is written. A process's first open

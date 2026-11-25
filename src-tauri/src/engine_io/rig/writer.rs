@@ -16,10 +16,17 @@ use crate::engine_io::chain::STASH_AFTER;
 use crate::engine_io::mode::SHUTDOWN_WAIT;
 use crate::engine_io::EngineHost;
 
-/// How long close waits for one completed feed pass: the time after which the model already calls the
-/// feed stopped and drains the ring itself (`chain::STASH_AFTER`). The feed drains every frame
-/// (~17 ms), so a running feed answers within a frame or two; a feed that is held or gone costs this
-/// once, at exit, and the close goes on with the model as it is.
+/// How many completed feed passes close waits for: two, so an event the engine held back for a full
+/// event ring is taken too. The first pass frees the ring; the engine publishes what it held back at
+/// its next callback (`publish_if_idle` at the feed's next tick when no device runs), and the second
+/// pass takes it. A device block longer than a feed frame can leave it to a later pass, past what close
+/// waits for.
+const FEED_PASSES: u64 = 2;
+
+/// How long close waits for its feed passes, from before its first read of the count: the time after
+/// which the model already calls the feed stopped and drains the ring itself (`chain::STASH_AFTER`).
+/// The feed drains every frame (~17 ms), so a running feed answers within two or three frames; a feed
+/// that is held or gone costs this once, at exit, and the close goes on with the model as it is.
 const FEED_PASS_WAIT: Duration = STASH_AFTER;
 
 /// Each slot's gain as the settings memory holds it (D2): what a gesture or the rig's seed last set in
@@ -68,7 +75,8 @@ impl Rig {
             None => return false,
         }
         let held = slot_gains(host);
-        let Some(projected) = self.project(held, view(host), false) else { return true };
+        // `None` with no record yet, or once close began (the plan is close's from then on).
+        let Some(projected) = self.project(held, view(host), false) else { return !self.closing.load(Acquire) };
         let (commit, seen) = {
             let mut disk = lock(&self.disk);
             if self.closing.load(Acquire) || disk.closed {
@@ -97,12 +105,13 @@ impl Rig {
     /// 2. under `disk`, whether there is a record to write: the store's status and record, not
     ///    `inner`'s copy (an import or a first open may have committed and not yet published it), which
     ///    is final now (every commit but this one checks `closing` under `disk`);
-    /// 3. wait, bounded ([`FEED_PASS_WAIT`]), for one completed feed pass, so an install or a parameter
-    ///    the engine applied and the event ring still holds is in the model; the feed thread drains,
-    ///    never this one;
+    /// 3. wait, bounded ([`FEED_PASS_WAIT`]), for [`FEED_PASSES`] completed feed passes, so an install
+    ///    or a parameter the engine applied and the event ring still holds (or the engine held back for a
+    ///    full ring) is in the model; the feed thread drains, never this one;
     /// 4. a fresh copy (the slot gains, then the chains), the store's record published to `inner`, the
     ///    plan judged at the full view, then projected with a `Leaving` plate dropped (the shutdown
-    ///    retires its tone);
+    ///    retires its tone). No tick changes the plan after step 1, so close's view is the last one
+    ///    that judges it;
     /// 5. commit it if it differs from what is stored, then release the lock file and set `closed`.
     ///
     /// The marker is close's last step (D6, SEAT-C): this launch names no load in it before CP3a's
@@ -114,7 +123,7 @@ impl Rig {
         }
         let found = Rig::found(&lock(&self.disk));
         let last = if found.stored.is_some() {
-            wait_feed_pass(host);
+            wait_feed_passes(host);
             let held = slot_gains(host);
             let view = view(host);
             self.keep(&found, Some(&view));
@@ -162,14 +171,19 @@ impl Rig {
 
     /// The record the chains stand for now: `held` and `view` as the caller took them (the slot gains,
     /// then the view, each lock released before the next), projected under `inner` with the plan, whose
-    /// ended ids go first, judged at the full view. At close a `Leaving` plate is then dropped (the
-    /// shutdown retires its tone). `None` while there is no record.
-    pub(super) fn project(&self, held: Volumes, mut view: RigView, closing: bool) -> Option<RigRecord> {
+    /// ended ids go first, judged at the full view. At close (`at_close`) a `Leaving` plate is then
+    /// dropped (the shutdown retires its tone). `None` while there is no record, and for a tick once
+    /// `closing` is set: checked under `inner`, so a tick changes the plan no more once close began, and
+    /// close judges it at its own view (a tick that judged it before used a view older than close's).
+    pub(super) fn project(&self, held: Volumes, mut view: RigView, at_close: bool) -> Option<RigRecord> {
         let mut inner = lock(&self.inner);
         let inner = &mut *inner;
+        if !at_close && self.closing.load(Acquire) {
+            return None;
+        }
         let stored = inner.stored.as_ref()?;
         end_ids(&mut inner.plan, &view);
-        if closing {
+        if at_close {
             for plates in &mut view.slots {
                 plates.retain(|p| p.state != PlateState::Leaving);
             }
@@ -178,14 +192,15 @@ impl Rig {
     }
 }
 
-/// Wait until the feed completes one pass that began after this call ([`FEED_PASS_WAIT`] at most). The
-/// count is read under `settings`, and polled lock-free after it.
-fn wait_feed_pass(host: &EngineHost) {
-    let since = host.feed_passes();
+/// Wait until the feed completes [`FEED_PASSES`] passes that began after this call, [`FEED_PASS_WAIT`]
+/// at most, its deadline taken before the count's first read (which waits for `settings`). The count is
+/// read under `settings`, and polled lock-free after it.
+fn wait_feed_passes(host: &EngineHost) {
     let deadline = Instant::now() + FEED_PASS_WAIT;
-    while host.core.feed_passes.load(Acquire) == since {
+    let since = host.feed_passes();
+    while host.core.feed_passes.load(Acquire).wrapping_sub(since) < FEED_PASSES {
         if Instant::now() >= deadline {
-            log::info!("[rig] no feed pass within {} ms; the close takes the chains as the model holds them", FEED_PASS_WAIT.as_millis());
+            log::info!("[rig] no {FEED_PASSES} feed passes within {} ms; the close takes the chains as the model holds them", FEED_PASS_WAIT.as_millis());
             return;
         }
         std::thread::sleep(Duration::from_millis(2));

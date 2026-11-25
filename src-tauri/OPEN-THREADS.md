@@ -13,12 +13,19 @@
 - A DEV session shares the release profile's tones and scan cache. `tauri dev` and the release share the
   app's data folder: the rig record is split by build kind (a DEV build keeps its own record and lock), but
   DEV chain units read and write the same `tones/` folder (`unit-<id>.tone`, `unit-<id>.pin`, a retire into
-  the slot's file), and a DEV scan writes the same scan cache. A never-changed unit no longer writes the
-  slot's file (its pin is its own), so what is left is a DEV unit the player changed retiring into a slot
-  file the release reads, and a DEV scan's cache entries. Not new with the native record (DEV chain units did it before).
+  the slot's file), and a DEV scan writes the same scan cache. A never-changed unit's pin is its own, but
+  its retire still overwrites the slot's file when it has a tone file of its own (`retire` copies the unit's
+  file whenever it exists, and `redeem` writes one for an imported tone: `host/tone.rs`), so what is left is a DEV
+  unit the player changed, or one that redeemed an import, retiring into a slot file the release reads,
+  and a DEV scan's cache entries. Not new with the native record (DEV chain units did it before).
   Next check, before chains reach players: a DEV run on a copy of a release profile, diffing `tones/` and
   the scan cache after a session; if the release's tones moved, a DEV tone folder of its own with the
   release's as a read-only fallback.
+- Two shutdowns (the updater's, then the exit's) both run the teardown after the rig's close: the second
+  close waits for the first (bounded), then both threads run `run_shutdown`, so the second may find MIDI
+  already taken and go on to the device's close while the first still drops MIDI. Not new with the rig
+  (the exit's caller is bounded by its 8 s `recv_timeout`). Next check: read `engine_io/mode.rs`'
+  `shutdown` for a once-guard; a test that calls the shutdown twice.
 - Tone recall: an owner's save of plugin P in slot S waits on that tone's own in-flight store write (an
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a

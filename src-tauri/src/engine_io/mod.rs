@@ -707,7 +707,7 @@ pub(crate) struct Core {
     /// The feed's completed drains (`EngineHost::drain_feed_taps`), each bumped under `settings` at
     /// its end: a count read under `settings` (`EngineHost::feed_passes`) moves only by a drain that
     /// began after the read, which took every event the engine had published by then. The rig's close
-    /// waits for one (`rig::Rig::close`); nothing on the audio thread reads or writes it.
+    /// waits for two (`rig::Rig::close`); nothing on the audio thread reads or writes it.
     pub(crate) feed_passes: AtomicU64,
     /// Count of gated unit commands dropped because their unit left or missed `GATE_DEADLINE`.
     pub(crate) gate_dropped: AtomicU64,
