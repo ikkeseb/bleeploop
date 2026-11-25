@@ -187,6 +187,25 @@
   same bound. Next check: a
   `chain_cmds_tests.rs` test whose fake plugin's re-activation (gated, as the edge tests do) outlasts the
   add's two waits, then a move on that slot: read which entered the port first.
+- A source whose role flips across a re-activation can still leave a slot with no playable source (DEV
+  chain mode, read from source by the edges review's third round, never run; the edges rounds stopped
+  there). (a) A plain `Withdraw(A)` whose box reaches the owner before the model reads the withdrawal: with
+  `Install(B, replaces A)` and `Remove(B)` already queued and A back as an effect, A skips both `Behind`
+  checks (`unit_host.rs` ~:1572) and can seat after B with no plate to remove it from. (b) A withdrawn
+  source back as an effect, refused on latency and parked: `head_source_id` (`chain.rs` ~:170) reads the
+  reported role, so a new source B is sent without `replaces: A` and the engine refuses it `Placement`;
+  after a rebuild, an A whose effect reseat is still queued when B seats is skipped by the role filter
+  (`chain.rs` ~:967) and keeps its owner and tone. (c) An effect E added before source A, which took the
+  head: after a rebuild A seats first with a `Remove` queued; `live_plate_ahead` skips A but
+  `newer_source` (`chain.rs` ~:441) still counts it, so E parks `Placement` and the slot loses both
+  sources when A goes. Also: a late `Seat` answer can make a move or remove answer `PortFull` with room in
+  the port. Tests that would not catch a wrong fix: the claim tests never try free places equal to the
+  claims (`<` for `<=` passes); the `Waiting` claim test can pass with the claim given only to
+  `ever_seated` owners (force `Unsent`; a CI stall past the 200 ms lease makes it falsely red); the
+  owner's queued-removal test can remove A before E's reseat; the first-push deadline tests hold only the
+  port lock; the no-waiter refusal test injects `Unanswered` instead of timing a `Waiting` caller out.
+  Next check: one `chain_tests.rs` test per edge (a)-(c) on `TestDevice` with the role flip scripted,
+  each reading the engine's chain and the plates after the last removal; then the test gaps above.
 - `tauriChainHost`'s per-slot queue (`src/platform/host.tauri.ts` `onChainSlot`) waits for each call to
   settle, so a remove or reload held across a take keeps the slot's later calls waiting until the take
   ends, while the native order mutex was already released at `waiting` (`chain_cmds.rs`
