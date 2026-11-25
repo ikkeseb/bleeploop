@@ -62,6 +62,18 @@ fn diag(report: String) {
     log::info!("diag: {report}");
 }
 
+/// DEV: end the process at once, as a plugin crashing the host would (`std::process::abort`: no
+/// unwinding, no exit handlers, nothing flushed). The storage-kill probe (`src/debug/storage-kill.ts`)
+/// calls it right after a `localStorage.setItem`; `set_at` is the page's `Date.now()` at that write,
+/// printed beside this side's clock on stderr (unbuffered), so the run's log shows the lag.
+#[cfg(debug_assertions)]
+#[tauri::command]
+fn debug_abort(set_at: f64) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0);
+    eprintln!("[storage-kill] abort: called {:.0} ms after the page's write", now - set_at);
+    std::process::abort();
+}
+
 /// Close guard (2026-08-16): a window close used to kill a jam with zero warning. The frontend owns
 /// the "is a jam in progress" answer, so CloseRequested is vetoed here and forwarded as an event;
 /// the frontend confirms with the user and calls `app_confirm_close` to actually close. If the
@@ -319,6 +331,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             #[cfg(debug_assertions)]
             diag,
+            #[cfg(debug_assertions)]
+            debug_abort,
             frontend_log,
             app_log_dir,
             app_open_log_dir,

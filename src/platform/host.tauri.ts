@@ -617,6 +617,15 @@ async function runBenchStalls(): Promise<void> {
   }, everyMs);
 }
 
+/**
+ * DEV: end the host process at once (`debug_abort`: `std::process::abort`, as a plugin crashing the host
+ * would), for the storage-kill probe (`src/debug/storage-kill.ts`). `setAt` is the page's `Date.now()` at
+ * the write it measures; Rust prints the lag. Resolves never when it works; rejects in a release build.
+ */
+export function tauriDebugAbort(setAt: number): Promise<void> {
+  return invoke('debug_abort', { setAt });
+}
+
 async function emitDiag(report: Record<string, unknown>): Promise<void> {
   try {
     await invoke('diag', { report: JSON.stringify(report) });
