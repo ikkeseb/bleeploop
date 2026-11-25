@@ -37,9 +37,10 @@
 //!   stamped**): the router's batches, what a binding fires, and the UI's looper presses, `Press`,
 //!   `SelectTrack` and toggles ([`MidiHost::ui_commands`]). A setting and GO LIVE's toggle go straight
 //!   to `EngineHost::send` (**Every toggle has one owner, the engine**); a note, a wheel, the note
-//!   target, a synth pick (`SetUnitParam(_, Instrument, _)`, `docs/unit-contract.md` §2: "sent only by
-//!   the note router") or a panic from the UI goes through the router's own calls, never past it (a UI
-//!   batch that holds one is refused whole, before any of it runs).
+//!   target, a DEV synth pick (`SetUnitParam(_, Instrument, _)`, `docs/unit-contract.md` §2: "sent only
+//!   by the note router"; a release build queues it as any unit command, as before the pick existed) or
+//!   a panic from the UI goes through the router's own calls, never past it (a UI batch that holds one
+//!   is refused whole, before any of it runs).
 //! - **No device here** (the rule: **The no-device rule**, `EngineSide::running`): the router records
 //!   no owner for a refused attack, learn no HOLD for a refused press. Releases, pedals, wheels, the
 //!   target and (DEV) a synth pick wait in the queue until a device runs; the port thread looks again every `IDLE_RETRY`, and every `RETRY` after a
@@ -305,7 +306,7 @@ impl Dropped {
 }
 
 /// A command the UI sends only through the router's own calls (a note, a wheel, the note target, a
-/// panic, a synth pick): refused as an engine command, the whole batch with it.
+/// panic, a DEV synth pick): refused as an engine command, the whole batch with it.
 pub fn router_command(command: &Command) -> bool {
     actions::ui_route(command) == UiRoute::Router
 }
@@ -645,8 +646,8 @@ impl Core {
         }
     }
 
-    /// One input's batch into the queue, whole; a refused attack is undone in the router and the
-    /// refusal counted.
+    /// One input's batch into the queue, whole; a refused attack (DEV: or synth pick) is undone in the
+    /// router and the refusal counted.
     fn admit(&self, st: &mut State, out: &mut Vec<Out>) -> Result<(), Refused> {
         if out.is_empty() {
             return Ok(());
@@ -654,6 +655,8 @@ impl Core {
         let admitted = st.queue.admit(out, self.engine.running());
         if let Err(why) = admitted {
             st.router.attack_refused(out);
+            #[cfg(debug_assertions)]
+            st.router.pick_refused(out);
             st.refused.count(why);
         }
         out.clear();
@@ -1159,22 +1162,13 @@ impl MidiHost {
     /// DEV (chain mode, as the `chain_*` commands): document `epoch` picks `instrument` (the UI's `SYNTHS`
     /// index) on `unit`, the SYNTH heading `slot`'s chain (`router::Router::pick`): the slot becomes the
     /// note target when it is not, what sounds is released, then `SetUnitParam(unit, Instrument, n)`, one
-    /// batch; the slot's last sent pick again sends only the switch, if any, and is never refused for
-    /// room (the router's dedupe is asked first). A pick the queue has no room for (its slot's place
-    /// taken, no free room: `Queue::takes_pick`) is refused here before the router moves (answered
-    /// `full`), so the router never forgets a note it then fails to release.
+    /// batch; the slot's last sent pick again sends only the switch, if any, which the queue always
+    /// takes. A batch carrying the pick that the queue has no room for is refused whole (answered
+    /// `full`) and the router put back as the pick found it (`router::Router::pick_refused`), so it never
+    /// forgets a note it failed to release nor keeps a target or a pick the engine never got.
     #[cfg(debug_assertions)]
     pub fn pick_synth(&self, epoch: u64, slot: u8, unit: lf_engine::UnitId, instrument: u8) -> Option<Dropped> {
-        let mut room = true;
-        let dropped = self.core.ui(epoch, |st, out| {
-            room = !st.router.pick_sends(slot, unit, instrument) || st.queue.takes_pick(slot, unit);
-            if room {
-                st.router.pick(slot, unit, instrument, out);
-            } else {
-                st.refused.count(Refused::Full);
-            }
-        });
-        if room { dropped } else { Some(Dropped::Full) }
+        self.core.ui(epoch, |st, out| st.router.pick(slot, unit, instrument, out))
     }
 
     /// DEV: a slot's seated SYNTH may have changed (a chain add on `slot`, `unit`'s removal): the router
@@ -1201,7 +1195,7 @@ impl MidiHost {
     /// with it off, so there is nothing to tell the player. A setting goes straight to the engine, and may
     /// overtake input still queued behind a full ring. GO LIVE's toggle goes straight there too, so no
     /// live operation overtakes another (`actions::UiRoute::Live`); dropped while no device runs or the
-    /// ring is full. A note, a wheel, the note target, a synth pick or a panic is
+    /// ring is full. A note, a wheel, the note target, a synth pick (DEV) or a panic is
     /// refused, the whole batch with it before any of it runs: those go through [`MidiHost::ui_note`],
     /// [`MidiHost::select_target`], `MidiHost::pick_synth` (DEV) and [`MidiHost::all_notes_off`]. Answers why a command was dropped,
     /// the first one's reason; the rest of the batch ran.

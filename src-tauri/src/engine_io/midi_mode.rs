@@ -31,7 +31,7 @@ fn midi<R>(f: impl FnOnce(&MidiHost) -> R) -> Result<R, String> {
 /// `input_send`'s batch, in order, for the page of `epoch`: a run of engine commands through
 /// [`MidiHost::ui_commands`] (input commands join the one ordered queue, settings go straight to the
 /// engine), each input event through the router's own call (a synth pick: DEV only, as the `chain_*`
-/// commands). A note, a wheel, the note target, a panic or a synth pick sent as an engine command refuses
+/// commands). A note, a wheel, the note target, a panic or (DEV) a synth pick sent as an engine command refuses
 /// the whole batch before any of it runs. An input event of a
 /// replaced page is refused there (`stale`); its engine commands run, as they always did. The answer is
 /// the first reason anything was dropped.
@@ -248,14 +248,19 @@ mod tests {
         assert!(newer > epoch);
     }
 
-    // A note, a wheel, the note target, a panic or a synth pick (unit contract §2: `instrument` is "sent
-    // only by the note router") sent as an engine command refuses the batch before any of it runs, so the
-    // outbox may send it again without running anything twice. Another SYNTH param stays the UI's.
+    // A note, a wheel, the note target, a panic or (DEV) a synth pick (unit contract §2: `instrument` is
+    // "sent only by the note router") sent as an engine command refuses the batch before any of it runs, so
+    // the outbox may send it again without running anything twice. Another SYNTH param stays the UI's. A
+    // release build runs a batch carrying the pick as before the pick existed (the queue's, as any unit
+    // command): `a_release_batch_carrying_a_synth_pick_runs_as_before`.
     #[test]
     fn a_batch_with_a_router_command_runs_nothing() {
         let (midi, engine, epoch) = rig();
-        let pick = json!({ "SetUnitParam": [7, "instrument", 2] });
-        for refused in [json!({ "NoteOn": [60, 0.5] }), json!({ "SelectInstrument": { "Slot": 0 } }), json!("AllNotesOff"), json!({ "PitchBend": 1.0 }), pick] {
+        let mut refused_ones = vec![json!({ "NoteOn": [60, 0.5] }), json!({ "SelectInstrument": { "Slot": 0 } }), json!("AllNotesOff"), json!({ "PitchBend": 1.0 })];
+        if cfg!(debug_assertions) {
+            refused_ones.push(json!({ "SetUnitParam": [7, "instrument", 2] }));
+        }
+        for refused in refused_ones {
             let batch = items(json!([
                 { "engine": "Press" },
                 { "input": { "note": { "owner": "pointer:1", "note": 60, "velocity": 100, "on": true } } },
@@ -267,6 +272,24 @@ mod tests {
         let gain = items(json!([{ "engine": { "SetUnitParam": [7, "gainBass", 0.5] } }]));
         assert_eq!(input_to(&midi, epoch, gain), Ok(None));
         assert_eq!(take(&engine), [Command::SetUnitParam(7, UnitParam::Gain(Instrument::Bass), 0.5)]);
+    }
+
+    // Release: the router sends no synth pick, so a batch carrying `SetUnitParam(_, Instrument, _)` as an
+    // engine command runs whole, in order, the pick queued as any unit command (as before the pick existed):
+    // the note-off before it is not lost to a refusal.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_release_batch_carrying_a_synth_pick_runs_as_before() {
+        let (midi, engine, epoch) = rig();
+        let on = items(json!([{ "input": { "note": { "owner": "pointer:1", "note": 60, "velocity": 127, "on": true } } }]));
+        assert_eq!(input_to(&midi, epoch, on), Ok(None));
+        let batch = items(json!([
+            { "input": { "note": { "owner": "pointer:1", "note": 60, "velocity": 0, "on": false } } },
+            { "engine": { "SetUnitParam": [7, "instrument", 2] } },
+            { "engine": "Press" },
+        ]));
+        assert_eq!(input_to(&midi, epoch, batch), Ok(None));
+        assert_eq!(take(&engine), [Command::NoteOn(60, 1.0), Command::NoteOff(60), Command::SetUnitParam(7, UnitParam::Instrument, 2.0), Command::Press]);
     }
 
     // A fresh press or note-on with no device is dropped and the batch says so; a release in it passes.

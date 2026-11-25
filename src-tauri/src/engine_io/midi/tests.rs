@@ -21,13 +21,15 @@ struct TestEngine {
     sent: Mutex<Vec<Command>>,
     running: AtomicBool,
     full: AtomicBool,
+    /// While `full`, how many more sends the ring still takes.
+    pass: AtomicU64,
     hook: Mutex<Option<Arc<dyn RebuildHook>>>,
 }
 
 impl EngineSide for TestEngine {
     fn send(&self, command: TimedCommand) -> Result<(), String> {
         assert_eq!(command.frame, None, "nothing is stamped");
-        if self.full.load(Relaxed) {
+        if self.full.load(Relaxed) && self.pass.fetch_update(Relaxed, Relaxed, |n| n.checked_sub(1)).is_err() {
             return Err("the engine's command ring is full".into());
         }
         self.sent.lock().unwrap().push(command.command);
@@ -350,13 +352,19 @@ fn pick(unit: lf_engine::UnitId, instrument: u8) -> Command {
     Command::SetUnitParam(unit, lf_engine::UnitParam::Instrument, f64::from(instrument))
 }
 
-// Unit contract §2 ("sent only by the note router"), in every build: a UI batch carrying a synth pick as an
-// engine command is refused whole, and another SYNTH param stays the UI's.
+// Unit contract §2 ("sent only by the note router"), DEV: a UI batch carrying a synth pick as an engine
+// command is refused whole. Release (the router sends no pick): the batch runs as before the pick existed,
+// the pick queued as any unit command. Another SYNTH param stays the UI's in both.
 #[test]
-fn a_ui_batch_carrying_a_synth_pick_is_refused_whole() {
+fn a_ui_batch_carrying_a_synth_pick_is_refused_whole_in_dev() {
     let r = Rig::new();
-    assert!(r.host.ui_commands(vec![Command::Press, pick(7, 1)]).is_err());
-    assert_eq!(r.take(), [], "nothing of a batch carrying a pick runs");
+    if cfg!(debug_assertions) {
+        assert!(r.host.ui_commands(vec![Command::Press, pick(7, 1)]).is_err());
+        assert_eq!(r.take(), [], "nothing of a batch carrying a pick runs");
+    } else {
+        assert_eq!(r.host.ui_commands(vec![Command::Press, pick(7, 1)]), Ok(None));
+        assert_eq!(r.take(), [Command::Press, pick(7, 1)], "a release batch carrying a pick runs whole, in order");
+    }
     let gain = Command::SetUnitParam(7, lf_engine::UnitParam::Gain(Instrument::Bass), 0.5);
     assert_eq!(r.host.ui_commands(vec![gain]), Ok(None));
     assert_eq!(r.take(), [gain]);
@@ -406,9 +414,9 @@ fn with_no_device_a_synth_pick_waits_for_it() {
 
 // DEV, review fix: each slot's pick has its own place, so with the room gone both slots' SYNTHs are
 // picked; a pick of the tail's unit replaces it. Only a pick whose slot's place is taken and whose unit's
-// pick is not the tail is refused, before the router moves (answered `full`); a pick equal to the slot's
-// last sends no pick (the router's dedupe is asked first), so it is never refused for room, its switch
-// alone going in. Once there is room, the refused pick goes through: the router never recorded it.
+// pick is not the tail is refused (answered `full`) and undone in the router; a pick equal to the slot's
+// last sends no pick, so it is never refused for room, its switch alone going in. Once there is room, the
+// refused pick goes through: the router kept nothing of it.
 #[cfg(debug_assertions)]
 #[test]
 fn with_the_room_gone_each_slots_pick_goes_in_and_a_repeated_pick_is_never_full() {
@@ -433,7 +441,50 @@ fn with_the_room_gone_each_slots_pick_goes_in_and_a_repeated_pick_is_never_full(
     assert_eq!(sent.last(), Some(&pick(9, 1)));
     assert_eq!(sent.iter().rev().find(|c| matches!(c, Command::SelectInstrument(_))), Some(&Command::SelectInstrument(NoteTarget::Slot(1))));
     assert_eq!(r.host.pick_synth(r.epoch(), 0, 7, 3), None);
-    assert_eq!(r.take(), [Command::SelectInstrument(NoteTarget::Slot(0)), pick(7, 3)], "the router never recorded the refused pick");
+    assert_eq!(r.take(), [Command::SelectInstrument(NoteTarget::Slot(0)), pick(7, 3)], "the router kept nothing of the refused pick");
+}
+
+// DEV, review fix (round 2): the queue's answer, not an estimate, decides a pick. Alternating picks on
+// the two slots fill the queue behind a full ring, its one switch replaced in place at the head. A
+// switch made after the last pick and then sent leaves no switch queued, so a pick of the tail's unit
+// needs a new switch at the tail, its own place taken and no free room: refused whole (`full`). The
+// router keeps the target and the slot's pick it had, so once there is room the same pick goes out
+// whole, its switch included.
+#[cfg(debug_assertions)]
+#[test]
+fn a_pick_whose_switch_takes_the_tail_is_refused_and_the_router_keeps_what_it_had() {
+    let mut r = Rig::new();
+    r.engine.full.store(true, Relaxed);
+    r.host.select_target(r.epoch(), Some(0), NoteTarget::Slot(0));
+    let units = [7, 9];
+    let mut k = 0usize;
+    let refused = loop {
+        let slot = k % 2;
+        let instrument = 1 + (k / 2 % 2) as u8;
+        if r.host.pick_synth(r.epoch(), slot as u8, units[slot], instrument) == Some(Dropped::Full) {
+            break slot;
+        }
+        k += 1;
+        assert!(k < 2 * queue::CAPACITY, "the picks fill the queue");
+    };
+    // The tail is the other slot's pick, and that slot the router's target.
+    let tail = 1 - refused;
+    r.host.select_target(r.epoch(), Some(refused as u8), NoteTarget::Slot(refused as u8));
+    r.engine.pass.store(1, Relaxed);
+    r.wait(RETRY);
+    assert_eq!(r.take(), [Command::SelectInstrument(NoteTarget::Slot(refused as u8))], "only the head: the switch, replaced in place");
+    let full = r.host.diag().refused.full;
+    assert_eq!(r.host.pick_synth(r.epoch(), tail as u8, units[tail], 5), Some(Dropped::Full), "its switch takes the tail: no room");
+    assert_eq!(r.host.diag().refused.full, full + 1);
+    r.engine.full.store(false, Relaxed);
+    r.wait(RETRY);
+    assert!(!r.take().contains(&pick(units[tail], 5)), "nothing of the refused batch was queued");
+    assert_eq!(r.host.pick_synth(r.epoch(), tail as u8, units[tail], 5), None);
+    assert_eq!(
+        r.take(),
+        [Command::SelectInstrument(NoteTarget::Slot(tail as u8)), pick(units[tail], 5)],
+        "the router kept its target and the slot's pick: sent whole"
+    );
 }
 
 // One ordered path into the engine: the UI's input commands join the one queue, so a pedal and a
@@ -1479,6 +1530,21 @@ fn a_queued_synth_pick_reaches_its_reseated_synth_through_the_gate_before_a_late
     assert_eq!(midi.pick_synth(epoch, 1, 9, 3), None);
     assert!(device.wait_blocks(8));
     assert_eq!(log.read().len(), 2, "the same pick again sends nothing");
+    // A chain add on the slot (`chain_add`'s `forget_picks(Some(slot), unit)`) and the SYNTH's removal
+    // (`chain_remove`'s `forget_picks(None, unit)`) each make the router forget the slot's pick: the same
+    // pick again reaches the SYNTH, once each time (the note it releases is no new attack).
+    midi.forget_picks(Some(1), 12);
+    assert_eq!(midi.pick_synth(epoch, 1, 9, 3), None);
+    assert!(device.wait_blocks(16));
+    assert_eq!(log.read(), [0x200 | 3, 0x100 | 60, 0x200 | 3], "sent again after an add on its slot");
+    midi.forget_picks(None, 9);
+    assert_eq!(midi.pick_synth(epoch, 1, 9, 3), None);
+    assert!(device.wait_blocks(16));
+    assert_eq!(log.read(), [0x200 | 3, 0x100 | 60, 0x200 | 3, 0x200 | 3], "sent again after its unit's removal");
+    midi.forget_picks(Some(0), 12);
+    assert_eq!(midi.pick_synth(epoch, 1, 9, 3), None);
+    assert!(device.wait_blocks(8));
+    assert_eq!(log.read().len(), 4, "an add on the other slot forgets nothing of this one");
     assert_eq!(host.core.gate_dropped.load(Relaxed), 0);
 
     synth.release();

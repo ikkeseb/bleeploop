@@ -21,7 +21,9 @@
 //! engine, and the events go to the UI either way, as a click's `onPress` and facade call run whatever
 //! the engine does with the press.
 
-use lf_engine::{Action, Command, InputSend, Toggle, UnitParam};
+use lf_engine::{Action, Command, InputSend, Toggle};
+#[cfg(debug_assertions)]
+use lf_engine::UnitParam;
 
 use super::bindings::ActionId;
 use super::learn::Fire;
@@ -142,10 +144,9 @@ pub(crate) enum UiRoute {
     /// A note, a wheel, the note target, a panic or a synth pick (`SetUnitParam(_, Instrument, _)`,
     /// `docs/unit-contract.md` §2: "sent only by the note router"): the router's alone (one ordered path
     /// into the engine). Refused here: sent past the router it would break note ownership (a pick
-    /// releases what sounds in its own batch). The pick's refusal stays in release builds, where the
-    /// router sends none: a release page sends no unit command at all (`host.tauri.ts` throws while
-    /// `lf.chainNative` is off, and it is never on outside DEV), so it refuses no batch a release page
-    /// sends.
+    /// releases what sounds in its own batch). The pick's refusal is DEV only, as the router's pick: a
+    /// release build routes `SetUnitParam(_, Instrument, _)` to the queue as every unit command, so a
+    /// release `input_send` batch runs exactly as before the pick existed.
     Router,
     /// A setting: straight to `EngineHost::send`, which keeps it (a rebuild would discard it queued).
     Direct,
@@ -161,6 +162,7 @@ pub(crate) enum UiRoute {
 pub(crate) fn ui_route(command: &Command) -> UiRoute {
     match command {
         Command::Action(Action::Toggle(Toggle::Live(_))) | Command::ActionOn(_, Action::Toggle(Toggle::Live(_))) => UiRoute::Live,
+        #[cfg(debug_assertions)]
         Command::SetUnitParam(_, UnitParam::Instrument, _) => UiRoute::Router,
         Command::RecDub(_)
         | Command::PlayStop(_)
@@ -334,6 +336,7 @@ mod tests {
             Command::Modulation(0.5),
             Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad)),
             Command::AllNotesOff,
+            #[cfg(debug_assertions)]
             Command::SetUnitParam(10, UnitParam::Instrument, 2.0),
         ];
         let settings = [
@@ -357,13 +360,16 @@ mod tests {
         }
     }
 
-    // Every unit command but a synth pick (the router's: `the_uis_commands_split_into_input_router_and_settings`).
+    // Every unit command but a DEV synth pick (the router's: `the_uis_commands_split_into_input_router_and_settings`);
+    // a release build queues the pick too, as before the pick existed.
     #[test]
     fn all_four_unit_command_forms_route_to_the_queue() {
         let unit_commands = [
             Command::SetUnitBypass(10, true),
             Command::SetUnitParam(10, UnitParam::Send(InputSendParam::EchoLevel), 0.5),
             Command::SetUnitParam(10, UnitParam::Gain(Instrument::Bass), 0.5),
+            #[cfg(not(debug_assertions))]
+            Command::SetUnitParam(10, UnitParam::Instrument, 2.0),
             Command::Action(Action::ToggleUnit(10)),
             Command::ActionOn(1, Action::ToggleUnit(10)),
         ];

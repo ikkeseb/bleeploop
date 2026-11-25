@@ -686,20 +686,24 @@ fn render_note(unit: &mut dyn UnitProcessor) -> Vec<f32> {
     heard
 }
 
-/// What an effect renders of a 10 ms burst at its first frame, 0.6 s at 48 kHz in blocks of 256, both
-/// channels.
+/// How long [`render_effect`] renders, in frames at 48 kHz: 1.2 s, past ECHO's second repeat at 1/4 and
+/// 120 bpm (the first at 0.5 s, the feedback's at 1 s).
+const EFFECT_FRAMES: usize = 57_600;
+
+/// What an effect renders of a 10 ms burst at its first frame, [`EFFECT_FRAMES`] in blocks of 256: the
+/// left channel's frames, then the right's.
 fn render_effect(unit: &mut dyn UnitProcessor) -> Vec<f32> {
-    const FRAMES: usize = 28_800;
-    let mut heard = Vec::with_capacity(FRAMES * 2);
-    for frame in (0..FRAMES).step_by(256) {
-        let n = 256.min(FRAMES - frame);
+    let (mut left, mut right) = (Vec::with_capacity(EFFECT_FRAMES * 2), Vec::with_capacity(EFFECT_FRAMES));
+    for frame in (0..EFFECT_FRAMES).step_by(256) {
+        let n = 256.min(EFFECT_FRAMES - frame);
         let input: Vec<f32> = (frame..frame + n).map(|f| if f < 480 { 0.5 * (f as f32 * 0.07).sin() } else { 0.0 }).collect();
         let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
         unit.process(&unit_cx(frame), [&input, &input], &[], [&mut l, &mut r]);
-        heard.extend(l);
-        heard.extend(r);
+        left.extend(l);
+        right.extend(r);
     }
-    heard
+    left.extend(right);
+    left
 }
 
 fn terms_at(rate: u32) -> Terms {
@@ -771,7 +775,8 @@ fn g_production_factory_seats_each_effect_with_its_params_applied_and_answered()
 /// (g1) The production factory applies what it answers: ECHO, REVERB and RING MOD built with every param
 /// of theirs away from its default render bit for bit what the same unit built directly and set to those
 /// params renders, and not what a build with no params (every default) renders. A factory that answered
-/// the params but built a unit at its defaults fails here.
+/// the params but built a unit at its defaults, or left one of them out, fails here: the render runs past
+/// ECHO's feedback repeat.
 #[test]
 fn g1_production_factory_builds_render_their_params_as_the_unit_set_directly() {
     use lf_engine::units::{EchoUnit, ReverbUnit, RingUnit};
@@ -797,6 +802,10 @@ fn g1_production_factory_builds_render_their_params_as_the_unit_set_directly() {
         let (mut defaults, _) = Builtins.build(kind, &Params::new(), terms_at(48_000)).unwrap();
         let heard = render_effect(built.as_mut());
         assert!(heard.iter().any(|&x| x != 0.0), "{kind:?} renders something");
+        if kind == UnitKind::Echo {
+            // 0.9 to 1.1 s, left: the feedback's repeat, which only the applied feedback makes.
+            assert!(heard[43_200..52_800].iter().any(|&x| x.abs() > 1e-4), "the render reaches ECHO's feedback repeat");
+        }
         assert!(heard == render_effect(direct.as_mut()), "{kind:?}: the factory's box renders as the unit set directly");
         assert!(heard != render_effect(defaults.as_mut()), "{kind:?}: its params change what it renders");
     }
@@ -858,10 +867,11 @@ fn g2_production_factory_seats_synth_with_its_pick_and_without_one_plays_lead() 
 }
 
 /// (g3) An engine at a new rate builds a seated SYNTH again at that rate from its applied params: the
-/// pick and the levels it was added with and a level set live after, answered by the engine. The plate
-/// reads the same params after and the SYNTH plays at the new rate: a twin of the rebuilt box renders a
-/// note bit for bit as a SYNTH built directly at 44.1 kHz and set to those params, and neither as one
-/// at 48 kHz nor as one on pick 0 (Lead). A rebuild at the same rate keeps the box (no build).
+/// pick and the levels it was added with and a level set live after on the instrument it plays (Piano),
+/// answered by the engine. The plate reads the same params after and the SYNTH plays at the new rate: a
+/// twin of the rebuilt box renders a note bit for bit as a SYNTH built directly at 44.1 kHz and set to
+/// those params, and neither as one at 48 kHz, nor as one on pick 0 (Lead), nor as one without the live
+/// level (a rebuild that dropped it fails). A rebuild at the same rate keeps the box (no build).
 #[test]
 fn g3_rebuild_at_a_new_rate_builds_synth_again_with_its_applied_pick_and_levels() {
     let device = start_device();
@@ -872,18 +882,19 @@ fn g3_rebuild_at_a_new_rate_builds_synth_again_with_its_applied_pick_and_levels(
     let factory = Arc::new(RecordingBuiltins { builds: Mutex::new(Vec::new()) });
     let chains = Chains::with_factory(factory.clone());
 
-    let asked = vec![(UnitParam::Instrument, 3.0), (UnitParam::Gain(Instrument::Piano), 0.6)];
+    // Pick 3 is Piano (`SYNTH_IDS`): the live level is the played instrument's, so the render hears it.
+    let asked = vec![(UnitParam::Instrument, 3.0), (UnitParam::Gain(Instrument::Organ), 0.6)];
     assert_eq!(add_builtin(&chains, host, (&doc_state, epoch), &slots, 0, 110, spec_with(UnitKind::Synth, asked), 0), Ok(Added::Seated));
-    host.send(TimedCommand { frame: None, command: Command::SetUnitParam(110, UnitParam::Gain(Instrument::Organ), 0.4) }).unwrap();
-    let organ = UnitParam::Gain(Instrument::Organ).index();
+    host.send(TimedCommand { frame: None, command: Command::SetUnitParam(110, UnitParam::Gain(Instrument::Piano), 0.4) }).unwrap();
+    let piano = UnitParam::Gain(Instrument::Piano).index();
     wait_until(PATIENCE, "the live level answered into the model", || {
         let mut ev = Vec::new();
         host.drain_feed(&mut ev);
-        plate_params(host, 110).get(&organ) == Some(&0.4)
+        plate_params(host, 110).get(&piano) == Some(&0.4)
     });
     let applied = plate_params(host, 110);
     assert_eq!(applied[&UnitParam::Instrument.index()], 3.0);
-    assert_eq!(applied[&UnitParam::Gain(Instrument::Piano).index()], 0.6);
+    assert_eq!(applied[&UnitParam::Gain(Instrument::Organ).index()], 0.6);
     assert_eq!(factory.builds.lock().unwrap().len(), 1);
 
     let reseated = |what: &str| {
@@ -907,22 +918,24 @@ fn g3_rebuild_at_a_new_rate_builds_synth_again_with_its_applied_pick_and_levels(
         assert_eq!(asked, applied, "built from the params as applied (the live level included)");
         let answered: BTreeMap<usize, f64> = answer.iter().map(|&(p, v)| (p.index(), v)).collect();
         assert_eq!(answered, applied, "the rebuilt box took the same pick and levels");
-        // A SYNTH built directly at `rate`, set to the applied params in `UnitParam::ALL`'s order; without
-        // the applied pick, pick 0 (Lead) in its place.
-        let direct = |rate: u32, with_pick: bool| {
+        // A SYNTH built directly at `rate`, set to the applied params in `UnitParam::ALL`'s order, but for
+        // the ones `unlike` changes (pick 0, Lead, in the applied pick's place; the asked level, 1, in the
+        // live one's).
+        let direct = |rate: u32, unlike: &[(UnitParam, f64)]| {
             let mut unit = SynthUnit::new(rate);
             for param in UnitParam::ALL {
                 if let Some(&value) = applied.get(&param.index()) {
-                    let value = if param == UnitParam::Instrument && !with_pick { 0.0 } else { value };
+                    let value = unlike.iter().find(|(p, _)| *p == param).map_or(value, |&(_, v)| v);
                     assert!(unit.set_param(&unit_cx(0), param, value).is_some(), "{}", param.key());
                 }
             }
             render_note(&mut unit)
         };
         assert!(heard.iter().any(|&x| x != 0.0), "the rebuilt box sounds");
-        assert!(*heard == direct(44_100, true), "the rebuilt box renders as a SYNTH at 44.1 kHz with the applied pick and levels");
-        assert!(*heard != direct(48_000, true), "not as one at the old rate");
-        assert!(*heard != direct(44_100, false), "not as one with pick 0 (Lead)");
+        assert!(*heard == direct(44_100, &[]), "the rebuilt box renders as a SYNTH at 44.1 kHz with the applied pick and levels");
+        assert!(*heard != direct(48_000, &[]), "not as one at the old rate");
+        assert!(*heard != direct(44_100, &[(UnitParam::Instrument, 0.0)]), "not as one with pick 0 (Lead)");
+        assert!(*heard != direct(44_100, &[(UnitParam::Gain(Instrument::Piano), 1.0)]), "not as one without the live level");
     }
     assert_eq!(plate_params(host, 110), applied, "the plate reads the same params");
     assert!(note_sounds(&device, 0), "the rebuilt SYNTH plays at the new rate");

@@ -21,9 +21,13 @@
 //!   attacks, HOLD presses, actions, and a release nothing reserved a slot for.
 //! - **A batch goes in whole or not at all** (one input's commands: a re-strike's `NoteOff` and
 //!   `NoteOn`, a switch's releases and the switch); a refused batch leaves nothing queued, and the
-//!   router undoes the attack that batch carried (`Router::attack_refused`). The drain sends command by
-//!   command, so a batch may reach the engine in two blocks: harmless, as a switch releases what sounds
-//!   on its own frame (`Rack::select`) and a synth pick releases its SYNTH's held notes itself.
+//!   router undoes the attack (DEV: the synth pick) that batch carried (`Router::attack_refused`,
+//!   `Router::pick_refused`). The drain sends command by command, so a batch the ring takes only in
+//!   part reaches the engine across two blocks. Not always inaudible: a switch's releases go held notes
+//!   first, so under a mono Bass holding one note while another is sustained, the first `NoteOff` lets
+//!   the Bass fall back to the sustained note and retrigger it for one block before the rest arrives.
+//!   Today's target switch splits the same way, in the same order; a DEV synth pick adds nothing new
+//!   (`src-tauri/OPEN-THREADS.md`).
 //! - **Routing stays chronological** (one ordered path into the engine). A target change replaces the
 //!   last one still queued only while nothing fresh (an attack, an action, a HOLD press) was admitted
 //!   after it, so no note is moved onto a target it was not played on; otherwise it goes in at the
@@ -34,7 +38,7 @@
 //!   one keeps the place again), and goes in with no device too (it starts nothing). It replaces the
 //!   queue's tail entry only when that is a pick of its unit, else it goes in at the tail: never ahead
 //!   of a target change or another slot's pick queued after its unit's last one. One whose slot's place
-//!   is taken needs free room; the host asks first ([`Queue::takes_pick`], after the router's dedupe),
+//!   is taken needs free room; a batch refused for it is undone in the router (`Router::pick_refused`),
 //!   so the router never forgets a note the queue then refuses. A release build has none of this.
 //! - **A panic goes in at the tail, and one still queued leaves its place:** silencing later ends
 //!   everything the earlier one would have (a target switch on the way releases what it leaves).
@@ -429,17 +433,6 @@ impl Queue {
             }
         }
         true
-    }
-
-    /// DEV: whether the router's pick of `unit` on `slot` would go in now: it replaces its unit's pick at
-    /// the tail, takes `slot`'s place, or finds free room a waiting wheel value does not take first
-    /// (`admit` places those before its batch). The rest of a pick's batch costs nothing (its releases
-    /// and its switch hold reserved slots; with its unit's pick at the tail there is nothing to release
-    /// and a switch goes in that pick's place), so the host asks this, after the router's dedupe and
-    /// before the router runs, and the batch is then taken.
-    #[cfg(debug_assertions)]
-    pub fn takes_pick(&self, slot: u8, unit: UnitId) -> bool {
-        self.tail_pick() == Some(unit) || self.pick_open(slot) || self.free() > self.waiting.iter().flatten().count()
     }
 
     fn panic_queued(&self) -> bool {
@@ -988,8 +981,8 @@ mod tests {
     // DEV: a synth pick takes its slot's place, with no device too (it starts nothing): with the room
     // gone its batch still goes in whole, behind a switch, and the router may forget the notes it
     // releases. Its unit's next pick replaces it only while it is the tail; the other slot has a place of
-    // its own; a pick whose place is taken and whose unit's pick is not the tail needs free room, which
-    // the host asks for first (`takes_pick`).
+    // its own; a pick whose place is taken and whose unit's pick is not the tail needs free room, and is
+    // refused without it (the router then undoes it: `Router::pick_refused`).
     #[cfg(debug_assertions)]
     #[test]
     fn a_pick_takes_its_slots_place_with_no_device_and_replaces_only_its_units_pick_at_the_tail() {
@@ -999,16 +992,16 @@ mod tests {
         fill(&mut q);
         assert_eq!(q.free(), 0);
         let gap = |q: &mut Queue, batch: &[Out]| q.admit(batch, false);
-        assert!(q.takes_pick(0, 7));
+        assert!(q.pick_open(0));
         let batch = with_pick(&[Command::NoteOff(60), Command::NoteOff(62), Command::SelectInstrument(NoteTarget::Slot(0))], 0, 7, 2);
         assert_eq!(gap(&mut q, &batch), Ok(()), "a pick's batch goes in whole, the room gone and no device");
-        assert!(q.takes_pick(0, 7), "its unit's pick is the tail");
+        assert_eq!(q.tail_pick(), Some(7), "its unit's pick is the tail");
         assert_eq!(gap(&mut q, &[Out::pick(0, 7, 4)]), Ok(()));
         assert_eq!(q.counters().picks_replaced, 1);
-        assert!(q.takes_pick(1, 9), "the other slot's place");
+        assert!(q.pick_open(1), "the other slot's place");
         assert_eq!(gap(&mut q, &with_pick(&[Command::SelectInstrument(NoteTarget::Slot(1))], 1, 9, 1)), Ok(()));
-        assert!(!q.takes_pick(0, 7), "slot 0's place is taken and its pick is no longer the tail");
-        assert_eq!(gap(&mut q, &[Out::pick(0, 7, 5)]), Err(Refused::Full), "what the host's ask spares the router");
+        assert!(!q.pick_open(0) && q.tail_pick() == Some(9), "slot 0's place is taken and its pick is no longer the tail");
+        assert_eq!(gap(&mut q, &[Out::pick(0, 7, 5)]), Err(Refused::Full));
         assert_eq!(gap(&mut q, &outs(&[Command::AllNotesOff])), Ok(()));
         assert_eq!(q.len(), CAPACITY, "every reserved slot taken");
         let all = take(&mut q, CAPACITY);
@@ -1018,7 +1011,7 @@ mod tests {
             [Command::NoteOff(60), Command::NoteOff(62), Command::SelectInstrument(NoteTarget::Slot(1)), pick(7, 4), pick(9, 1), Command::AllNotesOff]
         );
         assert_eq!(all.iter().filter(|c| matches!(c, Command::SetUnitParam(..))).count(), 2);
-        assert!(q.takes_pick(0, 7), "emptied, its place is free again");
+        assert!(q.pick_open(0), "emptied, its place is free again");
     }
 
     // DEV, review fix: picks stay chronological. A pick after a switch or after the other slot's pick goes
@@ -1044,10 +1037,10 @@ mod tests {
         // With the room gone right after a fresh entry, each slot's next pick still has its place.
         admit(&mut q, &[Command::NoteOn(61, 0.5)]).unwrap();
         fill(&mut q);
-        assert!(q.takes_pick(0, 11) && q.takes_pick(1, 12));
+        assert!(q.pick_open(0) && q.pick_open(1));
         assert_eq!(q.admit(&[Out::pick(0, 11, 0)], true), Ok(()));
         assert_eq!(q.admit(&[Out::pick(1, 12, 0)], true), Ok(()));
-        assert!(!q.takes_pick(0, 13));
+        assert_eq!(q.admit(&[Out::pick(0, 13, 0)], true), Err(Refused::Full));
     }
 
     // DEV: a rebuild keeps a queued pick in queue order with the other unit commands for the host's gate
