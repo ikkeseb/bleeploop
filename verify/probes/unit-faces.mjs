@@ -70,6 +70,8 @@ const SIZES = [
   [960, 600],
 ];
 
+/** An empty rig record: the chain starts empty (contract § 6's upgrade would seat Lead and Bass). */
+const EMPTY_RIG = { 'lf.rig': JSON.stringify({ version: 1, slots: [{ volume: 1, units: [] }, { volume: 1, units: [] }] }) };
 const failures = [];
 let ran = 0;
 let current = null;
@@ -99,6 +101,7 @@ await probe(async ({ open }) => {
     const first = W === 1920;
     const { page } = await open({
       viewport: { width: W, height: H },
+      storage: EMPTY_RIG,
       init: (p) =>
         p.addInitScript(() => {
           window.__lfEngineFake = true;
