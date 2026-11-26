@@ -61,7 +61,8 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   (`tuner/tuner-loop.ts`), which tells its Solid side the note, the in-tune state and the no-signal
   state through a callback, on change only; and the unit faces' (`units/ott-loop.ts`: the OTT face's glass
   and its plate's miniature; `units/echo-loop.ts`: the ECHO face's tape, its params and tempo a plain view
-  the face's effect writes), which read the units' meter mirror (`units/unit-meters.ts`) the engine store
+  the face's effect writes; `units/ring-loop.ts`: the RING MOD face's carrier, its params a plain view the
+  face's effect writes), which read the units' meter mirror (`units/unit-meters.ts`) the engine store
   writes from the feed's `unitMeters`, never a signal. The tuner overlay shows exactly while the feed's last
   `Tuner` event said on (every reset frame turns it off before its events apply); Esc and its close
   send `SetTuner(false)`, never a local flip.
@@ -91,7 +92,7 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   effect pick's auto-start) `SetSlotLive`; the cap shows the feed's `live` (`state/native-io.ts`).
 - **The chain seam:** while `platform.chain.available` (the DEV fake with `__lfChainFake`; natively, DEV only,
   the DEV flag `localStorage['lf.chainNative'] = '1'`, read once per page: `src/platform/host.tauri.ts`) each slot's line draws its chain from the feed's `chains` (`units/ChainLine.tsx`,
-  `state/chain.ts`): one plate anatomy, the `+`, moves by menu and drag, the OTT's and the ECHO's faces (one
+  `state/chain.ts`): one plate anatomy, the `+`, moves by menu and drag, the OTT's, the ECHO's and the RING MOD's faces (one
   frame, `units/UnitFace.tsx`: home just under the plate, nothing drawn between them, moved and scaled by
   the player, kept per kind in `lf.unitFaces`; free-standing, drawn by `units/FaceHost.tsx` apart from the
   row, so a press beside one plays the looper, a fold leaves it open, and the stage view hides and keeps it,

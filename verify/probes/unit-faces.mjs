@@ -1,7 +1,8 @@
 /**
- * The unit faces as free-standing gear (`src/ui/units/UnitFace.tsx`, `face-place.ts`) and the ECHO's own
- * face (`EchoFace.tsx`, its tape `echo-loop.ts`), driven as a player drives them on the browser fake's chain
- * (`docs/unit-contract.md` §10, `src/platform/chain-fake.ts`), the chain asked for with `__lfChainFake`.
+ * The unit faces as free-standing gear (`src/ui/units/UnitFace.tsx`, `face-place.ts`), the ECHO's own
+ * face (`EchoFace.tsx`, its tape `echo-loop.ts`) and the RING MOD's own face (`RingFace.tsx`, its carrier
+ * `ring-loop.ts`), driven as a player drives them on the browser fake's chain (`docs/unit-contract.md` §10,
+ * `src/platform/chain-fake.ts`), the chain asked for with `__lfChainFake`.
  *
  * - the ECHO face: a press on its plate's name opens it under the plate with no strap (no settings popover);
  *   TIME by the keyboard, a position's press and a drag sends `SetUnitParam` with the engine's index (the
@@ -44,9 +45,15 @@
  *   hides and makes faces inert then restores them on exit; where the row folds, a fold leaves the face open
  *   where it stood, in the window, closing the last OTT cancels its draw loop (its glass or its miniature last), and the stage view queues
  *   no face draw;
- * - per size (1920x1080, 2560x1440, 1000x700, 960x600): both faces open at home, no strap, every legend at
+ * - the RING MOD face: a press on its plate's name opens it under the plate with no strap (no popover);
+ *   FREQ (log 20–1500 Hz, printed in Hz/kHz with nearest note at A4 = 440) and LEVEL send `SetUnitParam`
+ *   and read the feed's value by keyboard and drag; the power switch is the bypass; scripted `unitMeters`
+ *   frames light the carrier and OUT (L upper, R lower) and a frame without the unit clears both; FREQ
+ *   moves the carrier wavelength and ruler marker; closing the last face cancels its rAF, and Stage View
+ *   queues no ring draw;
+ * - per size (1920x1080, 2560x1440, 1000x700, 960x600): every face opens at home, no strap, every legend at
  *   12 px or more and none clipped (inside the face and inside every box that clips it), their controls
- *   reached by the pointer, the ECHO's tape live on the fake's timer.
+ *   reached by the pointer, the ECHO's tape and the RING MOD's carrier live on the fake's timer.
  *
  * `--shots=<dir>` writes both faces open at home and moved at 1920x1080 and 1000x700
  * (`<echo|ott>-<home|moved>-<W>x<H>.png`), each size's OTT and ECHO at home, and both faces open at once at
@@ -135,16 +142,17 @@ await probe(async ({ open }) => {
     const shot = (name) => (SHOTS ? page.screenshot({ path: `${SHOTS}/${name}-${W}x${H}.png` }) : null);
     const echoFace = () => page.getByRole('dialog', { name: 'ECHO, slot A' });
     const ottFace = () => page.getByRole('dialog', { name: 'OTT, slot A' });
+    const ringFace = () => page.getByRole('dialog', { name: 'RING MOD, slot A' });
+    const faceOf = (kind) => (kind === 'echo' ? echoFace() : kind === 'ring' ? ringFace() : ottFace());
     /** Open `kind`'s face from its plate's name, unless it is open (a red check before may have closed it). */
     const openFace = async (kind) => {
-      const face = kind === 'echo' ? echoFace() : ottFace();
+      const face = faceOf(kind);
       if (await face.count()) return;
       await show();
       await plate(await unitOf(kind)).locator('.unit__name').click();
       await face.waitFor({ timeout: 2000 });
       await settle();
     };
-    const faceOf = (kind) => (kind === 'echo' ? echoFace() : ottFace());
     /** Close every open face by its close. */
     const closeFace = async () => {
       while ((await page.locator('.uface__close').count()) > 0) await page.locator('.uface__close').first().click();
@@ -245,6 +253,52 @@ await probe(async ({ open }) => {
         // OUT's two ladders: L at MX + 3, R at MX + 18, each 6 px wide; the foot cell's green
         return { lit, litR, newest: lit.length ? Math.max(...lit) : null, meter: cell(MX + 5), meterR: cell(MX + 20) };
       }, frac);
+    /** The RING MOD's glass: lit carrier pixels on L (upper) and R (lower) at `frac` of HALF, lobe count
+     * along L, the frequency ruler caret's x, and OUT's two ladders near their foot. */
+    const ringGlass = (frac = 0.55) =>
+      page.evaluate((frac) => {
+        const cv = document.querySelector('.ring__canvas');
+        const d = cv.width / cv.clientWidth;
+        const W = cv.clientWidth;
+        const H = cv.clientHeight;
+        const narrow = H < 200;
+        const MX = W - 46;
+        const X1 = MX - 22;
+        const YC = narrow ? 82 : 108;
+        const HALF = narrow ? 46 : 66;
+        const rule = narrow ? 140 : 192;
+        const ctx = cv.getContext('2d');
+        const row = (y) => ctx.getImageData(0, Math.round(y * d), cv.width, 1).data;
+        const scan = (y) => {
+          const r = row(y);
+          let count = 0;
+          let lobes = 0;
+          let dark = 99;
+          for (let x = 42; x < X1 - 2; x++) {
+            const i = Math.round(x * d) * 4;
+            const lit = r[i] > 170 && r[i + 3] > 60;
+            if (lit) {
+              count++;
+              // 2 px bars on a 3 px pitch leave a 1 px gap inside a lobe; >= 4 px dark separates lobes
+              if (dark >= 4) lobes++;
+              dark = 0;
+            } else dark++;
+          }
+          return { count, lobes };
+        };
+        const upper = scan(YC - frac * HALF);
+        const lower = scan(YC + frac * HALF);
+        // the carrier caret sits directly above `rule` (rule - 4)
+        const mr = row(rule - 4);
+        const markerXs = [];
+        for (let x = 36; x <= X1 + 4; x++) {
+          const i = Math.round(x * d) * 4;
+          if (mr[i] > 200 && mr[i + 3] > 180) markerXs.push(x);
+        }
+        const markerX = markerXs.length ? (Math.min(...markerXs) + Math.max(...markerXs)) / 2 : null;
+        const cell = (x) => [...ctx.getImageData(Math.round(x * d), Math.round((YC + HALF - 6) * d), 1, 1).data];
+        return { litL: upper.count, lobesL: upper.lobes, litR: lower.count, markerX, meter: cell(MX + 5), meterR: cell(MX + 20) };
+      }, frac);
 
     /** A page of its own at `viewport` with the ECHO's face open in slot A; `kept` is stored as `lf.unitFaces`
      * before the app loads (none: whatever the page keeps stays, so a reload keeps what a move saved). */
@@ -273,9 +327,10 @@ await probe(async ({ open }) => {
       await p2.waitForTimeout(120);
     };
 
-    // the scene: an OTT and an ECHO in slot A
+    // the scene: an OTT, an ECHO and a RING MOD in slot A
     await add('OTT');
     await add('ECHO');
+    await add('RING MOD');
 
     if (first) {
       await check('the ECHO face: a press on the plate’s name opens it under the plate, with no strap', async () => {
@@ -1474,6 +1529,200 @@ await probe(async ({ open }) => {
           });
         }
       });
+      // ── the RING MOD face ("the carrier") ──────────────────────────────────────────────────────────
+      await check('the RING MOD face: a press on the plate’s name opens it under the plate, with no strap', async () => {
+        await closeFace();
+        await openFace('ring');
+        assert.equal(await page.locator('.infx-pop').count(), 0, 'no settings popover');
+        const fb = await ringFace().boundingBox();
+        const pb = await plate(await unitOf('ring')).boundingBox();
+        assert.ok(fb.y > pb.y + pb.height && fb.y < pb.y + pb.height + 30, `under the plate: face top ${fb.y}, plate foot ${pb.y + pb.height}`);
+        assert.equal(await page.locator('.uface-tie').count(), 0, 'no strap drawn between plate and face');
+        assert.deepEqual(
+          await ringFace().getByRole('slider').evaluateAll((els) => els.map((e) => e.getAttribute('aria-label'))),
+          ['RING MOD frequency', 'RING MOD level'],
+        );
+      });
+      await check('the RING MOD face: FREQ (log 20–1500 Hz, Hz/kHz + note) and LEVEL send SetUnitParam and read the feed', async () => {
+        await openFace('ring');
+        const ring = await unitOf('ring');
+        const freq = page.getByRole('slider', { name: 'RING MOD frequency' });
+        const freqVal = page.locator('.ring .uface__ctl:has([data-param="ringFreq"]) .uface__val');
+        const glassRead = page.locator('.ring .ring__read');
+        assert.equal(await freq.getAttribute('aria-valuetext'), '440 Hz, A4', 'default 440 Hz · A4');
+        assert.match(await freqVal.textContent(), /^440\s*Hz\s*·\s*A4$/);
+        assert.match(await glassRead.textContent(), /^440\s*Hz\s*·\s*A4$/);
+        await freq.focus();
+        await page.keyboard.press('ArrowUp');
+        await settle();
+        const upHz = (await chains())[0].units.find((u) => u.id === ring).params.ringFreq;
+        assert.ok(upHz > 440 && upHz < 470, `log ArrowUp from 440 Hz stepped smoothly (got ${upHz})`);
+        assert.ok((await sent()).some((c) => c.SetUnitParam?.[0] === ring && c.SetUnitParam[1] === 'ringFreq' && c.SetUnitParam[2] === upHz), 'SetUnitParam ringFreq sent');
+        await page.keyboard.press('Home');
+        await settle();
+        assert.equal((await chains())[0].units.find((u) => u.id === ring).params.ringFreq, 20, 'Home: 20 Hz');
+        assert.equal(await freq.getAttribute('aria-valuetext'), '20 Hz, D#0');
+        await page.keyboard.press('End');
+        await settle();
+        assert.equal((await chains())[0].units.find((u) => u.id === ring).params.ringFreq, 1500, 'End: 1500 Hz');
+        assert.equal(await freq.getAttribute('aria-valuetext'), '1.50 kHz, F#6');
+        assert.match(await freqVal.textContent(), /^1\.50\s*kHz\s*·\s*F#6$/);
+        // log drag down halfway (110 px): from 1500 Hz lands near geometric midpoint sqrt(20*1500) ≈ 173 Hz
+        const fb = await freq.boundingBox();
+        await drag(fb.x + fb.width / 2, fb.y + fb.height / 2, 0, 110, 6);
+        const midHz = (await chains())[0].units.find((u) => u.id === ring).params.ringFreq;
+        assert.ok(midHz > 120 && midHz < 240, `half-travel log drag landed near geometric mid ~173 Hz (got ${midHz})`);
+        await freq.dblclick();
+        await settle();
+        assert.equal((await chains())[0].units.find((u) => u.id === ring).params.ringFreq, 440, 'double-click resets to 440 Hz');
+        // LEVEL knob: keyboard and drag
+        const level = page.getByRole('slider', { name: 'RING MOD level' });
+        await level.focus();
+        await page.keyboard.press('End');
+        await settle();
+        assert.ok((await sent()).some((c) => c.SetUnitParam?.[0] === ring && c.SetUnitParam[1] === 'ringLevel' && c.SetUnitParam[2] === 1), 'End: 1');
+        assert.equal(await level.getAttribute('aria-valuenow'), '100');
+        await page.keyboard.press('ArrowDown');
+        await settle();
+        assert.equal((await chains())[0].units.find((u) => u.id === ring).params.ringLevel, 0.99);
+        assert.match(await page.locator('.ring .uface__ctl:has([data-param="ringLevel"]) .uface__val').textContent(), /^99\s*%$/);
+        const lb = await level.boundingBox();
+        await drag(lb.x + lb.width / 2, lb.y + lb.height / 2, 0, 110, 4);
+        const took = (await chains())[0].units.find((u) => u.id === ring).params.ringLevel;
+        assert.ok(took > 0.44 && took < 0.56, `a 110 px drag down lowers LEVEL by ~0.5 (took ${took})`);
+      });
+      await check('the RING MOD face: the power switch is the unit’s bypass, and the face shows it', async () => {
+        await openFace('ring');
+        const ring = await unitOf('ring');
+        const pwr = page.locator('.ring .uface__pwr');
+        assert.equal(await pwr.getAttribute('aria-pressed'), 'true');
+        await pwr.click();
+        await settle();
+        assert.ok((await sent()).some((c) => c.Action?.ToggleUnit === ring), 'ToggleUnit sent');
+        assert.equal((await chains())[0].units.find((u) => u.id === ring).bypass, true, 'the fake bypassed it');
+        assert.equal(await pwr.getAttribute('aria-pressed'), 'false');
+        assert.ok(await page.locator('.ring').evaluate((e) => e.classList.contains('uface--byp')), 'the face drawn bypassed');
+        await page.waitForTimeout(300);
+        assert.equal(await page.locator('.ring .ring__canvas').evaluate((e) => getComputedStyle(e).opacity), '0.4', 'its glass sits back');
+        await pwr.click();
+        await settle();
+        assert.equal(await pwr.getAttribute('aria-pressed'), 'true', 'on again');
+      });
+      await check('the RING MOD face: scripted unitMeters light the carrier and OUT (L/R), FREQ moves the wave and marker, and omission clears it', async () => {
+        await openFace('ring');
+        const ring = await unitOf('ring');
+        await page.evaluate(() => (window.__lf.native.chain.meterTimer = false));
+        try {
+          await emit({ unitMeters: [] });
+          await page.waitForTimeout(150);
+          const rest = await ringGlass();
+          assert.equal(rest.litL, 0, 'silent: upper carrier flat and dim');
+          assert.equal(rest.litR, 0, 'silent: lower carrier flat and dim');
+          assert.ok(rest.meter[1] < 80 && rest.meterR[1] < 80, `silent: OUT ladders dark (L ${rest.meter}, R ${rest.meterR})`);
+          // loud stereo frames light both halves and both OUT ladders
+          for (let i = 0; i < 4; i++) await emit({ unitMeters: [{ unit: ring, out: [0.85, 0.85] }] });
+          await page.waitForTimeout(120);
+          const lit440 = await ringGlass();
+          assert.ok(lit440.litL > 40 && lit440.litR > 40, `lit stereo carrier: L ${lit440.litL}, R ${lit440.litR}`);
+          assert.ok(lit440.meter[1] > 120 && lit440.meterR[1] > 120, `OUT lit: L ${lit440.meter}, R ${lit440.meterR}`);
+          // right-only frame lights lower half and R ladder while upper half stays flat
+          await emit({ unitMeters: [] });
+          await page.waitForTimeout(60);
+          await emit({ unitMeters: [{ unit: ring, out: [0, 0.85] }] });
+          await page.waitForTimeout(120);
+          const rightOnly = await ringGlass();
+          assert.equal(rightOnly.litL, 0, 'right-only: L half stays flat');
+          assert.ok(rightOnly.litR > 40, `right-only: R half lit (${rightOnly.litR})`);
+          assert.ok(rightOnly.meter[1] < 80 && rightOnly.meterR[1] > 120, `right-only OUT: L ${rightOnly.meter}, R ${rightOnly.meterR}`);
+          // changing FREQ from 20 Hz to 1500 Hz packs more carrier lobes across the glass and shifts the ruler marker
+          await emit({ unitMeters: [{ unit: ring, out: [0.85, 0.85] }] });
+          await page.evaluate(async (id) => {
+            const { sendEngine } = await import('/src/platform/index.ts');
+            sendEngine({ SetUnitParam: [id, 'ringFreq', 20] });
+          }, ring);
+          await page.waitForTimeout(120);
+          const at20 = await ringGlass(0.5);
+          await page.evaluate(async (id) => {
+            const { sendEngine } = await import('/src/platform/index.ts');
+            sendEngine({ SetUnitParam: [id, 'ringFreq', 1500] });
+          }, ring);
+          await page.waitForTimeout(120);
+          const at1500 = await ringGlass(0.5);
+          assert.ok(at1500.lobesL > at20.lobesL + 10, `carrier frequency packs lobes on log scale: 20 Hz (${at20.lobesL}) -> 1500 Hz (${at1500.lobesL})`);
+          assert.ok(at20.markerX !== null && at1500.markerX !== null && at1500.markerX - at20.markerX > 650, `ruler marker spans scale: ${at20.markerX} -> ${at1500.markerX}`);
+          await page.evaluate(async (id) => {
+            const { sendEngine } = await import('/src/platform/index.ts');
+            sendEngine({ SetUnitParam: [id, 'ringFreq', 440] });
+          }, ring);
+          // a frame without the unit clears both halves and both OUT ladders
+          await emit({ unitMeters: [] });
+          await page.waitForTimeout(120);
+          const cleared = await ringGlass();
+          assert.equal(cleared.litL, 0, 'omission clears L carrier');
+          assert.equal(cleared.litR, 0, 'omission clears R carrier');
+          assert.ok(cleared.meter[1] < 80 && cleared.meterR[1] < 80, `omission clears OUT: L ${cleared.meter}, R ${cleared.meterR}`);
+        } finally {
+          await page.evaluate(() => (window.__lf.native.chain.meterTimer = true));
+        }
+      });
+      await check('the RING MOD draw loop cancels its queued frame on last close and queues nothing under the stage view', async () => {
+        await atHome('ring');
+        await page.evaluate(() => {
+          const origRaf = window.requestAnimationFrame.bind(window);
+          const origCancel = window.cancelAnimationFrame.bind(window);
+          window.__ringSpy = { origRaf, origCancel, lastId: 0, cancelled: [], ran: 0, ranAfter: 0, closed: false };
+          window.requestAnimationFrame = (cb) => {
+            const isRing = String(cb).includes('drawRingGlass');
+            const id = origRaf((ts) => {
+              if (isRing && window.__ringSpy) {
+                window.__ringSpy.ran++;
+                if (window.__ringSpy.closed) window.__ringSpy.ranAfter++;
+              }
+              cb(ts);
+            });
+            if (isRing && window.__ringSpy) window.__ringSpy.lastId = id;
+            return id;
+          };
+          window.cancelAnimationFrame = (id) => {
+            if (window.__ringSpy) window.__ringSpy.cancelled.push(id);
+            return origCancel(id);
+          };
+        });
+        try {
+          await page.waitForTimeout(100);
+          const shown = await page.evaluate(() => window.__ringSpy.ran);
+          assert.ok(shown > 0, `premise: RING MOD draws while shown (${shown})`);
+          // stage view suspends the ring draw loop and resumes it on exit
+          await ringFace().focus();
+          await page.keyboard.press('b');
+          await page.locator('.sv').waitFor({ timeout: 2000 });
+          await settle();
+          const hidden0 = await page.evaluate(() => window.__ringSpy.ran);
+          await page.waitForTimeout(250);
+          assert.equal(await page.evaluate(() => window.__ringSpy.ran), hidden0, 'no RING MOD draw callback ran while stage view hid the face');
+          await page.keyboard.press('b');
+          await page.locator('.sv').waitFor({ state: 'detached', timeout: 2000 });
+          await page.waitForTimeout(150);
+          const resumed = await page.evaluate(() => window.__ringSpy.ran);
+          assert.ok(resumed > hidden0, `RING MOD draws again after stage view (${hidden0} -> ${resumed})`);
+          // closing the last RING MOD face cancels its queued rAF
+          await page.locator('.ring .uface__close').click();
+          await page.evaluate(() => {
+            window.__ringSpy.closed = true;
+          });
+          await page.waitForTimeout(100);
+          const res = await page.evaluate(() => ({ lastId: window.__ringSpy.lastId, cancelled: window.__ringSpy.cancelled, ranAfter: window.__ringSpy.ranAfter }));
+          assert.ok(res.lastId > 0 && res.cancelled.includes(res.lastId), `queued RING MOD rAF ${res.lastId} cancelled: ${JSON.stringify(res.cancelled)}`);
+          assert.equal(res.ranAfter, 0, `no RING MOD draw callback ran after close (${res.ranAfter})`);
+        } finally {
+          await page.evaluate(() => {
+            if (!window.__ringSpy) return;
+            window.requestAnimationFrame = window.__ringSpy.origRaf;
+            window.cancelAnimationFrame = window.__ringSpy.origCancel;
+            delete window.__ringSpy;
+          });
+        }
+      });
     }
 
     // ── a fold: where the row shows one slot at a time, the other's plate folds away under an open face ──
@@ -1602,13 +1851,13 @@ await probe(async ({ open }) => {
       });
     }
 
-    // ── per size: both faces at home, type and clipping, reach, the tape live ─────────────────────────
-    for (const kind of ['echo', 'ott']) {
+    // ── per size: every face at home, type and clipping, reach, live glass ────────────────────────────
+    for (const kind of ['echo', 'ott', 'ring']) {
       await check(`${kind.toUpperCase()} at ${W}x${H}: at home, no strap, legends 12 px or more and none clipped, its controls in reach`, async () => {
         await openFace(kind);
         const sel = `.${kind}`;
         // home, whatever an earlier check left
-        await (kind === 'echo' ? echoFace() : ottFace()).focus();
+        await faceOf(kind).focus();
         await page.keyboard.press('Home');
         await settle();
         assert.equal(await page.locator('.uface-tie').count(), 0, 'no strap at home');
@@ -1627,9 +1876,51 @@ await probe(async ({ open }) => {
           // the fake's timer: a note on the first downbeat lights the tape at once
           await page.waitForTimeout(SHOTS ? 4500 : 500);
           assert.ok((await tape(0.6)).newest !== null, 'the tape runs on the fake’s meters');
+        } else if (kind === 'ring') {
+          await page.evaluate(async (id) => {
+            const { sendEngine } = await import('/src/platform/index.ts');
+            sendEngine({ SetUnitParam: [id, 'ringFreq', 440] }, { SetUnitParam: [id, 'ringLevel', 0.5] });
+          }, await unitOf('ring'));
+          // wait until the fake's timer lights the carrier brightly
+          await page.waitForFunction(() => {
+            const cv = document.querySelector('.ring__canvas');
+            if (!cv || cv.width === 0) return false;
+            const d = cv.width / cv.clientWidth;
+            const H = cv.clientHeight;
+            const YC = H < 200 ? 82 : 108;
+            const HALF = H < 200 ? 46 : 66;
+            const row = cv.getContext('2d').getImageData(0, Math.round((YC - 0.55 * HALF) * d), cv.width, 1).data;
+            let n = 0;
+            for (let x = 42; x < cv.clientWidth - 70; x++) if (row[Math.round(x * d) * 4] > 170 && row[Math.round(x * d) * 4 + 3] > 60) n++;
+            return n > 40;
+          }, { timeout: 3000 });
+          assert.ok((await ringGlass(0.55)).litL > 40, 'the carrier runs on the fake’s meters');
         } else if (SHOTS) await page.waitForTimeout(2500);
         await page.evaluate(() => document.activeElement?.blur());
-        if (SHOTS) await shot(kind === 'echo' ? 'echo-home' : 'ott-home');
+        if (SHOTS) await shot(`${kind}-home`);
+        if (SHOTS && kind === 'ring' && W === 1920) {
+          // narrow layout at 1920x1080, glass alive
+          await faceOf(kind).focus();
+          await page.keyboard.press('-');
+          await settle();
+          const tn = await typeAndClip(sel);
+          assert.ok(tn.min >= 12 - 1e-6, `narrow smallest type ${tn.min.toFixed(2)} px (${tn.what})`);
+          assert.deepEqual(tn.clipped, [], 'no legend clipped in narrow');
+          await page.evaluate(() => document.activeElement?.blur());
+          await page.waitForFunction(() => {
+            const cv = document.querySelector('.ring__canvas');
+            if (!cv || cv.width === 0) return false;
+            const d = cv.width / cv.clientWidth;
+            const row = cv.getContext('2d').getImageData(0, Math.round((82 - 0.55 * 46) * d), cv.width, 1).data;
+            let n = 0;
+            for (let x = 42; x < cv.clientWidth - 70; x++) if (row[Math.round(x * d) * 4] > 170 && row[Math.round(x * d) * 4 + 3] > 60) n++;
+            return n > 40;
+          }, { timeout: 3000 });
+          await shot('ring-narrow');
+          await faceOf(kind).focus();
+          await page.keyboard.press('Home');
+          await settle();
+        }
         if (SHOTS && (W === 1920 || W === 1000)) {
           // moved off home: over the lanes
           const p = await panelPoint(sel);
@@ -1637,7 +1928,7 @@ await probe(async ({ open }) => {
           await page.evaluate(() => document.activeElement?.blur());
           await page.waitForTimeout(600);
           await shot(`${kind}-moved`);
-          await (kind === 'echo' ? echoFace() : ottFace()).focus();
+          await faceOf(kind).focus();
           await page.keyboard.press('Home');
         }
         await closeFace();
