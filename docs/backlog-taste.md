@@ -18,9 +18,10 @@ added a line.
   every whole bar, as built (END STOP only stops playback). The owner asks other players before
   deciding on wording or behaviour.
 - **Stage view (B): SCOPE's visual direction.** Its additive live columns are the part to keep (a
-  locked loop glows, a one-off peaks and dies). A taste review of stills read the rest as a dark-mode
-  DAW arrangement view (label gutter, gridlines, a large dim top bay); whether a new design round is
-  wanted waits for the owner's eye on the device (`STATUS.md` next jam, 4). A hitch the owner saw came
+  locked loop glows, a one-off peaks and dies). Its chrome (the HUD, the lane keys, the bays' panel)
+  follows the main screen's panel language since the owner said it no longer fit (2026-11-26). A taste
+  review of stills read the look itself as a dark-mode DAW arrangement view (label gutter, gridlines, a
+  large dim top bay); whether a design round beyond the chrome is wanted waits for the owner's eye on the device (`STATUS.md` next jam, 4). A hitch the owner saw came
   under the MIDI benchmark's deliberate 250 ms UI stalls, not yet in an ordinary run. Reference the
   owner flagged for a design round (2026-10-26): Thundercode's concert visuals for Alesso,
   https://thundercode.se/work/alesso/.

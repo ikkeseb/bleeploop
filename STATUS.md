@@ -144,6 +144,9 @@ settles.
 - SCOPE's beam moves on with the bar when the live columns stop, and only a fresh column takes it:
   does it ever jump, stutter or lag the bar when the view opens mid-loop?
 - In the stage view: does the count-in read from where you stand?
+- The stage view in the main screen's panel language (lane keys with LED bars, the tempo in a glass
+  window like the command bar's, SCOPE's bays in one glass pane, the selected bay a tone step with no
+  lit edge): does it read as the same instrument as the main screen from where you stand?
 - Audio Settings in four pages behind a rail (DEVICE · MIDI PEDALS · PLUGINS · DIAGNOSTICS): does a
   pedal's port pick take fewer moves?
 - The rail's lamp and state word on each page: does the lamp read from the chair?
