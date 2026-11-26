@@ -245,23 +245,31 @@ export function StageView(props: { onExit: () => void }) {
         <div class="sv-band">
           <div class="sv-chips" role="list" aria-label="Tracks">
             <For each={lanes}>
-              {(l) => (
-                <span
-                  class="sv-chip"
-                  classList={{ 'is-selected': looper.selectedTrack() === l.i, 'is-stopping': l.stopping() }}
-                  role="listitem"
-                  data-state={DATA_STATE[l.displayState()]}
-                  data-muted={l.word() === 'MUTED' ? 'true' : undefined}
-                  aria-label={`Track ${l.i + 1}, ${spoken(l)}`}
-                  aria-current={looper.selectedTrack() === l.i ? 'true' : undefined}
-                >
-                  <span class="sv-chip__win" aria-hidden="true">
-                    <span class="sv-chip__lamp" />
-                    <span class="k-led sv-chip__led" />
+              {(l) => {
+                const state = () => DATA_STATE[l.displayState()];
+                const muted = () => l.word() === 'MUTED';
+                // The recipes' lit LED (.k-led.is-on): the bar while the lane sounds or listens, the D14
+                // rec lamp while it captures. A muted or stopped bar keeps stage.css's quiet unlit tone.
+                const sounds = () => !muted() && ['play', 'rec', 'dub', 'listening'].includes(state());
+                const captures = () => state() === 'rec' || state() === 'dub';
+                return (
+                  <span
+                    class="k-key sv-chip"
+                    classList={{ 'is-selected': looper.selectedTrack() === l.i, 'is-stopping': l.stopping() }}
+                    role="listitem"
+                    data-state={state()}
+                    data-muted={muted() ? 'true' : undefined}
+                    aria-label={`Track ${l.i + 1}, ${spoken(l)}`}
+                    aria-current={looper.selectedTrack() === l.i ? 'true' : undefined}
+                  >
+                    <span class="sv-chip__win" aria-hidden="true">
+                      <span class="k-led k-led--dot sv-chip__lamp" classList={{ 'is-on': captures() }} />
+                      <span class="k-led sv-chip__led" classList={{ 'is-on': sounds() }} />
+                    </span>
+                    <span class="sv-chip__num">{l.i + 1}</span>
                   </span>
-                  <span class="sv-chip__num">{l.i + 1}</span>
-                </span>
-              )}
+                );
+              }}
             </For>
           </div>
 

@@ -23,6 +23,9 @@ export interface Palette {
   surfSel: string;
   glass: string;
   sunk: string;
+  glassLine: string;
+  glassTop: string;
+  hair: string;
   rowLine: string;
   text: string;
   legend: string;
@@ -45,6 +48,9 @@ export function readPalette(el: Element): Palette {
     surfSel: v('--surf-sel', '#1d2024'),
     glass: v('--glass', '#07090b'),
     sunk: v('--sunk', '#0b0d10'),
+    glassLine: v('--glass-line', 'rgba(255, 255, 255, 0.05)'),
+    glassTop: v('--glass-top', 'rgba(255, 255, 255, 0.07)'),
+    hair: v('--hair', 'rgba(255, 255, 255, 0.06)'),
     rowLine: v('--row-line', '#0b0c0e'),
     text: v('--text', '#e9ecef'),
     legend: v('--legend', '#c3c8cf'),

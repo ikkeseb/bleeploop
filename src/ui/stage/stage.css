@@ -64,40 +64,33 @@
   transition-duration: 0.08s;
 }
 
-/* ---- lane keys: .k-key family caps with sound LED bar + D14 rec lamp; selected warm-white ---- */
+/* ---- lane keys: each a .k-key cap whose window (.sv-chip__win) holds a .k-led bar and the D14 round rec
+   lamp (.k-led--dot), lit by .is-on (StageView.tsx) in the lane's sound colour (--sc, handed to the
+   recipe as --led). Only what differs from the recipes is drawn here: the size, the bar's quiet unlit
+   tones, muted, the selected warm-white face. ---- */
 .sv-chips {
   display: flex;
   align-items: center;
   gap: clamp(6px, 0.85vh, 10px);
 }
-.sv-chip {
-  --sc: var(--faint);
-  --led-c: var(--sc);
-  --wi: clamp(5px, 0.65vh, 8px);
-  --wh: clamp(3px, 0.45vh, 5px);
-  position: relative;
-  flex: none;
+.sv-chip.k-key {
+  --sc: var(--faint); /* the lane's state colour: its number and its lit LEDs */
+  --led: var(--sc);
+  --kh: var(--sv-chip);
+  --wi: clamp(5px, 0.65vh, 8px); /* the window's inset from the cap's edge */
+  --wh: clamp(3px, 0.45vh, 5px); /* its height */
   width: calc(var(--sv-chip) * 1.14);
-  height: var(--sv-chip);
-  padding-top: calc(var(--wi) + var(--wh) + 2px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--r-sm);
-  background: var(--cap);
-  box-shadow: var(--cap-light), var(--cap-wall), var(--cap-contact);
-  font-family: var(--font-name);
-  font-size: max(20.5px, calc(var(--sv-chip) * 0.54));
-  font-weight: 650;
-  line-height: 1;
+  padding: calc(var(--wi) + var(--wh) + 2px) 0 0;
+  font: 650 max(20.5px, calc(var(--sv-chip) * 0.54)) / 1 var(--font-name);
   font-variant-numeric: tabular-nums;
+  letter-spacing: normal;
   color: var(--sc);
+  transition: none; /* a lane's sound state lands on the frame the feed switches it (app.css MOTION) */
 }
 .sv-chip__num {
   display: block;
   line-height: 1;
 }
-/* LED bar + D14 round rec lamp embedded across the top of the key cap */
 .sv-chip__win {
   position: absolute;
   top: var(--wi);
@@ -108,20 +101,23 @@
   align-items: center;
   gap: 3px;
 }
-.sv-chip__lamp {
-  display: none;
-  flex: none;
-  width: var(--wh);
-  height: var(--wh);
-  border-radius: 50%;
-  background: var(--led-socket);
-  box-shadow: var(--led-socket-shade);
+.sv-chip .k-led {
+  transition: none;
 }
-.sv-chip__led {
+.k-led.sv-chip__led {
   flex: 1 1 auto;
   width: auto;
   height: 100%;
   border-radius: 1.5px;
+}
+.k-led.sv-chip__lamp {
+  display: none;
+  width: var(--wh);
+  height: var(--wh);
+}
+/* D14: the rec lamp shows while the lane captures (lit) or waits to (ARMED: its dark socket) */
+.sv-chip:is([data-state='rec'], [data-state='dub'], [data-state='armed']) .sv-chip__lamp {
+  display: block;
 }
 
 /* State colour mapping (kept in step with the probe's chip contract) */
@@ -133,11 +129,6 @@
 .sv-chip[data-state='listening'] { --sc: var(--cyan); }
 .sv-chip.is-stopping { --sc: var(--dub); }
 
-/* Lit LED bar in the lane's sound colour */
-.sv-chip:is([data-state='play'], [data-state='rec'], [data-state='dub'], [data-state='listening']):not([data-muted]) .sv-chip__led {
-  background: var(--sc);
-  box-shadow: 0 0 5px 1px color-mix(in srgb, var(--sc) 50%, transparent), 0 0 2px color-mix(in srgb, var(--sc) 90%, transparent);
-}
 /* A held loop that is silent keeps a quiet unglowing light, as the looper lane's bar does (looper.css):
    STOPPED grey between EMPTY and PLAYING, MUTED the silent tone turned down; EMPTY alone is a dark lens. */
 .sv-chip[data-state='stop']:not([data-muted]) .sv-chip__led {
@@ -150,14 +141,6 @@
 .sv-chip[data-state='armed'] .sv-chip__led {
   background: color-mix(in srgb, var(--sc) 55%, var(--led-socket));
   box-shadow: 0 0 4px color-mix(in srgb, var(--sc) 40%, transparent);
-}
-/* D14: round rec lamp beside the bar while capturing (rec/dub lit; armed dark socket) */
-.sv-chip:is([data-state='rec'], [data-state='dub'], [data-state='armed']) .sv-chip__lamp {
-  display: block;
-}
-.sv-chip:is([data-state='rec'], [data-state='dub']) .sv-chip__lamp {
-  background: var(--sc);
-  box-shadow: 0 0 5px 1px color-mix(in srgb, var(--sc) 55%, transparent), 0 0 2px color-mix(in srgb, var(--sc) 90%, transparent);
 }
 /* Recording pulses gently (pinned by the stage-view probe); listening breathes its LED bar */
 .sv-chip[data-state='rec'] {
