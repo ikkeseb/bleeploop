@@ -11,7 +11,7 @@ import './ring-face.css';
  * (log-mapped across the window so 20 Hz reads as a slow wobble and 1.5 kHz as a dense metallic shimmer)
  * with the unit's output (`unitMeters[].out`, L above the zero axis and R below) riding on it, a log
  * frequency scale from 20 Hz to 1.5 kHz with the carrier's place marked, and stereo OUT ladders
- * (`ring-loop.ts`, never through a signal). Under it FREQ, the hero (log 20–1500 Hz, printed in Hz/kHz with
+ * (`ring-loop.ts`, never through a signal). Under it FREQ, the hero (log 20–1500 Hz, printed in whole Hz with
  * the nearest note at A4 = 440), and LEVEL (percent).
  */
 
@@ -30,13 +30,14 @@ const SCALE_TICKS: readonly { hz: number; value: string; unit?: string; align?: 
   { hz: 1500, value: '1.5', unit: 'kHz', align: 'right' },
 ];
 
-/** Format a carrier frequency in Hz/kHz with its nearest 12-TET note (A4 = 440 Hz). */
+/** Format a carrier frequency in whole Hz with its nearest 12-TET note (A4 = 440 Hz). */
 function formatFreq(hz: number): KnobFormat {
   const n = noteOf(hz);
   const noteName = n ? `${n.name}${n.octave}` : '';
-  const kHz = hz >= 1000;
-  const value = kHz ? (hz / 1000).toFixed(2) : String(Math.round(hz));
-  const unit = kHz ? 'kHz' : 'Hz';
+  // whole hertz, as the knob sends them, so the figure and its note always agree (a kHz figure rounded to
+  // 10 Hz could print a note the true value is not nearest)
+  const value = String(Math.round(hz));
+  const unit = 'Hz';
   return {
     value,
     unit,

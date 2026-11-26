@@ -54,7 +54,7 @@
  *   where it stood, in the window, closing the last OTT cancels its draw loop (its glass or its miniature last), and the stage view queues
  *   no face draw;
  * - the RING MOD face: a press on its plate's name opens it under the plate with no strap (no popover);
- *   FREQ (log 20–1500 Hz, printed in Hz/kHz with nearest note at A4 = 440) and LEVEL send `SetUnitParam`
+ *   FREQ (log 20–1500 Hz, printed in whole Hz with the nearest note at A4 = 440) and LEVEL send `SetUnitParam`
  *   and read the feed's value by keyboard and drag; the power switch is the bypass; scripted `unitMeters`
  *   frames light the carrier and OUT (L upper, R lower) and a frame without the unit clears both; FREQ
  *   moves the carrier wavelength and ruler marker; closing the last face cancels its rAF, and Stage View
@@ -1763,7 +1763,7 @@ await probe(async ({ open }) => {
           ['RING MOD frequency', 'RING MOD level'],
         );
       });
-      await check('the RING MOD face: FREQ (log 20–1500 Hz, Hz/kHz + note) and LEVEL send SetUnitParam and read the feed', async () => {
+      await check('the RING MOD face: FREQ (log 20–1500 Hz, whole Hz + note) and LEVEL send SetUnitParam and read the feed', async () => {
         await openFace('ring');
         const ring = await unitOf('ring');
         const freq = page.getByRole('slider', { name: 'RING MOD frequency' });
@@ -1785,8 +1785,8 @@ await probe(async ({ open }) => {
         await page.keyboard.press('End');
         await settle();
         assert.equal((await chains())[0].units.find((u) => u.id === ring).params.ringFreq, 1500, 'End: 1500 Hz');
-        assert.equal(await freq.getAttribute('aria-valuetext'), '1.50 kHz, F#6');
-        assert.match(await freqVal.textContent(), /^1\.50\s*kHz\s*·\s*F#6$/);
+        assert.equal(await freq.getAttribute('aria-valuetext'), '1500 Hz, F#6');
+        assert.match(await freqVal.textContent(), /^1500\s*Hz\s*·\s*F#6$/);
         // log drag down halfway (110 px): from 1500 Hz lands near geometric midpoint sqrt(20*1500) ≈ 173 Hz
         const fb = await freq.boundingBox();
         await drag(fb.x + fb.width / 2, fb.y + fb.height / 2, 0, 110, 6);

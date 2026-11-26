@@ -125,7 +125,7 @@ function frame(): void {
     const version = v ? v.version : 0;
     const w = g.view;
     const shown = Math.round(g.canvas.getBoundingClientRect().width);
-    const laid = `${g.canvas.clientWidth}x${g.canvas.clientHeight}@${shown}:${w.freq}:${w.level}`;
+    const laid = `${g.canvas.clientWidth}x${g.canvas.clientHeight}@${shown}x${window.devicePixelRatio || 1}:${w.freq}:${w.level}`;
     if (version === g.drawn && v === g.src && laid === g.laid) continue;
     // already drawn at rest for this layout/params and no loud frame arrived since: skip silent frames
     if (g.resting && laid === g.laid && v === g.src && v !== undefined && v.loud <= g.drawn) {

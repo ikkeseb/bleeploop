@@ -394,13 +394,14 @@ export function FaceKnob(props: { def: KnobDef; narrow: () => boolean; unit: () 
     const el = e.currentTarget as HTMLElement;
     el.focus({ preventScroll: true });
     el.setPointerCapture(e.pointerId);
-    drag = { id: e.pointerId, y: e.clientY, from: travel(), el };
+    // a log knob drags along its travel; a linear one along its value, exactly as before the log knobs came
+    drag = { id: e.pointerId, y: e.clientY, from: log ? travel() : value(), el };
     setHeld(value());
   };
   const onMove = (e: PointerEvent) => {
     if (!drag || drag.id !== e.pointerId || !enabled()) return;
-    const t = drag.from + ((drag.y - e.clientY) / DRAG_PX) * (e.shiftKey ? 0.25 : 1);
-    setHeld(send(fromTravel(t)));
+    const d = ((drag.y - e.clientY) / DRAG_PX) * (e.shiftKey ? 0.25 : 1);
+    setHeld(send(log ? fromTravel(drag.from + d) : drag.from + d * (max - min)));
   };
   const onUp = (e: PointerEvent) => {
     if (drag?.id === e.pointerId) letGo(true);

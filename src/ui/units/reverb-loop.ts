@@ -104,7 +104,7 @@ function frame(): void {
     const version = v ? v.version : 0;
     // its size as drawn (the face's own scale moves it, not its layout size)
     const shown = Math.round(g.canvas.getBoundingClientRect().width);
-    const laid = `${g.canvas.clientWidth}x${g.canvas.clientHeight}@${shown}`;
+    const laid = `${g.canvas.clientWidth}x${g.canvas.clientHeight}@${shown}x${window.devicePixelRatio || 1}`;
     // silent and still: nothing to draw again (a silent frame moves the version and lights nothing; a loud
     // one since the last draw, however many silent ones followed it, is drawn)
     const fresh = v !== g.src || (v !== undefined && v.loud > g.drawn);
