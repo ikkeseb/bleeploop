@@ -306,8 +306,40 @@ await probe(async ({ open }) => {
           if (mr[i] > 200 && mr[i + 3] > 180) markerXs.push(x);
         }
         const markerX = markerXs.length ? (Math.min(...markerXs) + Math.max(...markerXs)) / 2 : null;
+        // max vertical reach (CSS px from YC) of the warm carrier trace in the central field (graticule is pure white: r === b)
+        let reachL = 0;
+        let reachR = 0;
+        const y0 = Math.round((YC - HALF) * d);
+        const bh = Math.round(2 * HALF * d);
+        const img = ctx.getImageData(0, y0, cv.width, bh).data;
+        const xStart = Math.round(60 * d);
+        const xEnd = Math.round((X1 - 20) * d);
+        for (let dy = 1; dy < HALF - 1; dy++) {
+          const yu = Math.round((YC - dy) * d) - y0;
+          const yd = Math.round((YC + dy) * d) - y0;
+          if (yu >= 0 && yu < bh) {
+            const base = yu * cv.width * 4;
+            for (let px = xStart; px < xEnd; px++) {
+              const i = base + px * 4;
+              if (img[i] > 180 && img[i] - img[i + 2] > 10 && img[i + 3] > 20) {
+                reachL = dy;
+                break;
+              }
+            }
+          }
+          if (yd >= 0 && yd < bh) {
+            const base = yd * cv.width * 4;
+            for (let px = xStart; px < xEnd; px++) {
+              const i = base + px * 4;
+              if (img[i] > 180 && img[i] - img[i + 2] > 10 && img[i + 3] > 20) {
+                reachR = dy;
+                break;
+              }
+            }
+          }
+        }
         const cell = (x) => [...ctx.getImageData(Math.round(x * d), Math.round((YC + HALF - 6) * d), 1, 1).data];
-        return { litL: upper.count, lobesL: upper.lobes, litR: lower.count, markerX, meter: cell(MX + 5), meterR: cell(MX + 20) };
+        return { litL: upper.count, lobesL: upper.lobes, litR: lower.count, reachL, reachR, markerX, meter: cell(MX + 5), meterR: cell(MX + 20) };
       }, frac);
 
     /** The REVERB's glass: the columns its body lights at `frac` of the way from the centre line to 0 dBFS
@@ -547,6 +579,15 @@ await probe(async ({ open }) => {
         await settle();
         assert.equal((await chains())[0].units.find((u) => u.id === echo).params.echoFeedback, 0.94);
         assert.match(await page.locator('.echo .uface__ctl:has([data-param="echoFeedback"]) .uface__val').textContent(), /^94\s*%$/);
+        // linear drag regression: from 40 %, a 110 px drag up sends exactly 0.88 (value-based, not travel-based)
+        await fb.focus();
+        await page.keyboard.press('Home');
+        for (let i = 0; i < 4; i++) await page.keyboard.press('PageUp');
+        await settle();
+        assert.equal((await chains())[0].units.find((u) => u.id === echo).params.echoFeedback, 0.4, 'premise: FEEDBACK at 40 %');
+        const fbb = await fb.boundingBox();
+        await drag(Math.round(fbb.x + fbb.width / 2), Math.round(fbb.y + fbb.height / 2), 0, -110, 4);
+        assert.equal((await chains())[0].units.find((u) => u.id === echo).params.echoFeedback, 0.88, 'linear drag: 40 % + 110 px up sends 0.88');
         const level = page.getByRole('slider', { name: 'ECHO level' });
         const lb = await level.boundingBox();
         await drag(lb.x + lb.width / 2, lb.y + lb.height / 2, 0, -44, 4);
@@ -1836,8 +1877,12 @@ await probe(async ({ open }) => {
           await emit({ unitMeters: [] });
           await page.waitForTimeout(150);
           const rest = await ringGlass();
-          assert.equal(rest.litL, 0, 'silent: upper carrier flat and dim');
-          assert.equal(rest.litR, 0, 'silent: lower carrier flat and dim');
+          assert.equal(rest.litL, 0, 'silent: upper carrier has no lit body away from the axis');
+          assert.equal(rest.litR, 0, 'silent: lower carrier has no lit body away from the axis');
+          assert.ok(
+            rest.reachL >= 4 && rest.reachL <= 10 && rest.reachR >= 4 && rest.reachR <= 10,
+            `silent: dim low-amplitude sine at rest (reach L ${rest.reachL} px, R ${rest.reachR} px)`,
+          );
           assert.ok(rest.meter[1] < 80 && rest.meterR[1] < 80, `silent: OUT ladders dark (L ${rest.meter}, R ${rest.meterR})`);
           // loud stereo frames light both halves and both OUT ladders
           for (let i = 0; i < 4; i++) await emit({ unitMeters: [{ unit: ring, out: [0.85, 0.85] }] });
@@ -1845,35 +1890,45 @@ await probe(async ({ open }) => {
           const lit440 = await ringGlass();
           assert.ok(lit440.litL > 40 && lit440.litR > 40, `lit stereo carrier: L ${lit440.litL}, R ${lit440.litR}`);
           assert.ok(lit440.meter[1] > 120 && lit440.meterR[1] > 120, `OUT lit: L ${lit440.meter}, R ${lit440.meterR}`);
-          // right-only frame lights lower half and R ladder while upper half stays flat
+          // right-only frame lights lower half and R ladder while upper half stays at rest
           await emit({ unitMeters: [] });
           await page.waitForTimeout(60);
           await emit({ unitMeters: [{ unit: ring, out: [0, 0.85] }] });
           await page.waitForTimeout(120);
           const rightOnly = await ringGlass();
-          assert.equal(rightOnly.litL, 0, 'right-only: L half stays flat');
+          assert.equal(rightOnly.litL, 0, 'right-only: L half stays dim at rest');
+          assert.ok(rightOnly.reachL <= 10, `right-only: L half stays in rest band (${rightOnly.reachL} px)`);
           assert.ok(rightOnly.litR > 40, `right-only: R half lit (${rightOnly.litR})`);
           assert.ok(rightOnly.meter[1] < 80 && rightOnly.meterR[1] > 120, `right-only OUT: L ${rightOnly.meter}, R ${rightOnly.meterR}`);
-          // changing FREQ from 20 Hz to 1500 Hz packs more carrier lobes across the glass and shifts the ruler marker
-          await emit({ unitMeters: [{ unit: ring, out: [0.85, 0.85] }] });
-          await page.evaluate(async (id) => {
-            const { sendEngine } = await import('/src/platform/index.ts');
-            sendEngine({ SetUnitParam: [id, 'ringFreq', 20] });
-          }, ring);
-          await page.waitForTimeout(120);
+          // changing FREQ from 20 Hz to 1500 Hz packs more carrier lobes across the glass and shifts the ruler marker on a log scale
+          // re-emit the loud frame after each FREQ edit settles (each edit's chains report carries the fake's cached reading)
+          const setFreqLoud = async (hz) => {
+            await page.evaluate(
+              async ([id, v]) => {
+                const { sendEngine } = await import('/src/platform/index.ts');
+                sendEngine({ SetUnitParam: [id, 'ringFreq', v] });
+              },
+              [ring, hz],
+            );
+            await settle();
+            await emit({ unitMeters: [{ unit: ring, out: [0.85, 0.85] }] });
+            await page.waitForTimeout(120);
+          };
+          await setFreqLoud(20);
           const at20 = await ringGlass(0.5);
-          await page.evaluate(async (id) => {
-            const { sendEngine } = await import('/src/platform/index.ts');
-            sendEngine({ SetUnitParam: [id, 'ringFreq', 1500] });
-          }, ring);
-          await page.waitForTimeout(120);
+          await setFreqLoud(173);
+          const at173 = await ringGlass(0.5);
+          await setFreqLoud(1500);
           const at1500 = await ringGlass(0.5);
           assert.ok(at1500.lobesL > at20.lobesL + 10, `carrier frequency packs lobes on log scale: 20 Hz (${at20.lobesL}) -> 1500 Hz (${at1500.lobesL})`);
           assert.ok(at20.markerX !== null && at1500.markerX !== null && at1500.markerX - at20.markerX > 650, `ruler marker spans scale: ${at20.markerX} -> ${at1500.markerX}`);
+          const midFrac = at173.markerX !== null ? (at173.markerX - at20.markerX) / (at1500.markerX - at20.markerX) : -1;
+          assert.ok(Math.abs(midFrac - 0.5) < 0.05, `ruler marker is log-placed: 173 Hz at ${(midFrac * 100).toFixed(1)} % of scale (expected ~50 %)`);
           await page.evaluate(async (id) => {
             const { sendEngine } = await import('/src/platform/index.ts');
             sendEngine({ SetUnitParam: [id, 'ringFreq', 440] });
           }, ring);
+          await settle();
           // a frame without the unit clears both halves and both OUT ladders
           await emit({ unitMeters: [] });
           await page.waitForTimeout(120);
@@ -1890,12 +1945,13 @@ await probe(async ({ open }) => {
         await page.evaluate(() => {
           const origRaf = window.requestAnimationFrame.bind(window);
           const origCancel = window.cancelAnimationFrame.bind(window);
-          window.__ringSpy = { origRaf, origCancel, lastId: 0, cancelled: [], ran: 0, ranAfter: 0, closed: false };
+          window.__ringSpy = { origRaf, origCancel, lastId: 0, cancelled: [], ran: 0, ranInStage: 0, ranAfter: 0, closed: false };
           window.requestAnimationFrame = (cb) => {
             const isRing = String(cb).includes('drawRingGlass');
             const id = origRaf((ts) => {
               if (isRing && window.__ringSpy) {
                 window.__ringSpy.ran++;
+                if (document.querySelector('.sv')) window.__ringSpy.ranInStage++;
                 if (window.__ringSpy.closed) window.__ringSpy.ranAfter++;
               }
               cb(ts);
@@ -1912,19 +1968,18 @@ await probe(async ({ open }) => {
           await page.waitForTimeout(100);
           const shown = await page.evaluate(() => window.__ringSpy.ran);
           assert.ok(shown > 0, `premise: RING MOD draws while shown (${shown})`);
-          // stage view suspends the ring draw loop and resumes it on exit
+          // stage view cancels the queued frame on entry and runs nothing from open to close
           await ringFace().focus();
           await page.keyboard.press('b');
           await page.locator('.sv').waitFor({ timeout: 2000 });
-          await settle();
-          const hidden0 = await page.evaluate(() => window.__ringSpy.ran);
           await page.waitForTimeout(250);
-          assert.equal(await page.evaluate(() => window.__ringSpy.ran), hidden0, 'no RING MOD draw callback ran while stage view hid the face');
+          const atClose = await page.evaluate(() => window.__ringSpy.ran);
           await page.keyboard.press('b');
           await page.locator('.sv').waitFor({ state: 'detached', timeout: 2000 });
+          assert.equal(await page.evaluate(() => window.__ringSpy.ranInStage), 0, 'no RING MOD draw callback ran from stage view open to close');
           await page.waitForTimeout(150);
           const resumed = await page.evaluate(() => window.__ringSpy.ran);
-          assert.ok(resumed > hidden0, `RING MOD draws again after stage view (${hidden0} -> ${resumed})`);
+          assert.ok(resumed > atClose, `RING MOD draws again after stage view (${atClose} -> ${resumed})`);
           // closing the last RING MOD face cancels its queued rAF
           await page.locator('.ring .uface__close').click();
           await page.evaluate(() => {
@@ -1986,11 +2041,14 @@ await probe(async ({ open }) => {
         await atHome('reverb');
         await page.evaluate(() => {
           const origRaf = window.requestAnimationFrame.bind(window);
-          window.__roomSpy = { origRaf, ran: 0 };
+          window.__roomSpy = { origRaf, ran: 0, ranInStage: 0 };
           window.requestAnimationFrame = (cb) => {
             const isRoom = String(cb).includes('drawRoom');
             return origRaf((ts) => {
-              if (isRoom && window.__roomSpy) window.__roomSpy.ran++;
+              if (isRoom && window.__roomSpy) {
+                window.__roomSpy.ran++;
+                if (document.querySelector('.sv')) window.__roomSpy.ranInStage++;
+              }
               cb(ts);
             });
           };
@@ -2002,14 +2060,13 @@ await probe(async ({ open }) => {
           await reverbFace().focus();
           await page.keyboard.press('b');
           await page.locator('.sv').waitFor({ timeout: 2000 });
-          await settle();
-          const hidden0 = await ran();
           await page.waitForTimeout(300);
-          assert.equal(await ran(), hidden0, 'no REVERB draw callback ran while the stage view hid the face');
+          const atClose = await ran();
           await page.keyboard.press('b');
           await page.locator('.sv').waitFor({ state: 'detached', timeout: 2000 });
+          assert.equal(await page.evaluate(() => window.__roomSpy.ranInStage), 0, 'no REVERB draw callback ran from stage view open to close');
           await page.waitForTimeout(200);
-          assert.ok((await ran()) > hidden0, `the glass draws again after the stage view (${hidden0} -> ${await ran()})`);
+          assert.ok((await ran()) > atClose, `the glass draws again after the stage view (${atClose} -> ${await ran()})`);
           assert.equal(await reverbFace().count(), 1, 'the face still open');
         } finally {
           await page.evaluate(() => {

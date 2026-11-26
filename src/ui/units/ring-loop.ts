@@ -5,13 +5,13 @@ import { OUT_HISTORY, unitMeters, type UnitMeterView } from './unit-meters';
  * phase-locked sine across the window, its drawn cycle count log-mapped over 20 Hz to 1.5 kHz so 20 Hz
  * reads as a slow wobble and 1.5 kHz as a dense metallic shimmer. The unit's output (`unitMeters[].out`,
  * per channel: L on the upper half, R on the lower) rides on the carrier as its amplitude and lit body:
- * silent, the carrier lies dim and flat on the zero axis; a note's attack lifts and lights it and it fades
+ * silent, the carrier rests as a dim low sine on the zero axis; a note's attack lifts and lights it and it fades
  * with the note. Along the glass's foot runs a log frequency ruler (20 Hz to 1.5 kHz) with the carrier's
  * place marked, and at the right OUT's two stereo LED ladders with 1-second peak hold.
  *
  * Invariant 6: reads no Solid signal and writes none; Solid only registers/unregisters the glass and writes
- * the plain `RingView`. Redraws only on a new meter `version` or when the view or backing size moved, and
- * stays idle on silence without flicker.
+ * the plain `RingView`. Redraws while active (signal or held peak lit) or when the view, meters or backing
+ * size moved, and goes idle once settled at silence without flicker.
  */
 
 /** Carrier frequency bounds (Hz), matching `InputSendParam::RingFreq`. */
@@ -33,15 +33,15 @@ interface Glass {
   src: UnitMeterView | undefined;
   /** The view, size and backing scale last drawn at. */
   laid: string;
-  /** The last draw settled at silence (flat dim carrier, dark ladders). */
+  /** The last draw settled at silence (low dim carrier, dark ladders). */
   resting: boolean;
 }
 
 const glasses = new Set<Glass>();
 let rafId = 0;
 
-/** Frames in OUT's held peak: one second at the feed's 60 frames a second. */
-const PEAK_FRAMES = 60;
+/** Milliseconds in OUT's held peak: one second, aged by wall time so it drops even if frames stop. */
+const PEAK_HOLD_MS = 1000;
 /** Output floor (dBFS) at rest; 0 dBFS reaches the carrier's full half-height. */
 const FLOOR = -54;
 /** Drawn carrier cycles across the glass: 20 Hz (slow wobble) to 1500 Hz (dense shimmer). */
@@ -120,19 +120,22 @@ export function suspendRingDraw(on: boolean): void {
 function frame(): void {
   rafId = 0;
   if (glasses.size === 0 || suspended) return;
+  const now = performance.now();
   for (const g of glasses) {
     const v = unitMeters.get(g.unit);
     const version = v ? v.version : 0;
     const w = g.view;
     const shown = Math.round(g.canvas.getBoundingClientRect().width);
     const laid = `${g.canvas.clientWidth}x${g.canvas.clientHeight}@${shown}x${window.devicePixelRatio || 1}:${w.freq}:${w.level}`;
-    if (version === g.drawn && v === g.src && laid === g.laid) continue;
-    // already drawn at rest for this layout/params and no loud frame arrived since: skip silent frames
-    if (g.resting && laid === g.laid && v === g.src && v !== undefined && v.loud <= g.drawn) {
-      g.drawn = version;
-      continue;
+    if (g.resting && laid === g.laid && v === g.src) {
+      if (version === g.drawn) continue;
+      // already drawn at rest for this layout/params and no loud frame arrived since: skip silent frames
+      if (v !== undefined && v.loud <= g.drawn) {
+        g.drawn = version;
+        continue;
+      }
     }
-    const res = drawRingGlass(g, v);
+    const res = drawRingGlass(g, v, now);
     if (res === null) continue;
     g.resting = res;
     g.drawn = version;
@@ -157,8 +160,8 @@ const edgeWindow = (p: number): number => {
   return 1;
 };
 
-/** Draw `gl`; returns whether the glass is at rest (silent), or null when not laid out yet. */
-function drawRingGlass(gl: Glass, v: UnitMeterView | undefined): boolean | null {
+/** Draw `gl` at wall time `nowMs`; returns whether the glass is at rest (silent), or null when not laid out yet. */
+function drawRingGlass(gl: Glass, v: UnitMeterView | undefined, nowMs: number): boolean | null {
   const cv = gl.canvas;
   const W = cv.clientWidth;
   const H = cv.clientHeight;
@@ -207,9 +210,9 @@ function drawRingGlass(gl: Glass, v: UnitMeterView | undefined): boolean | null 
     const newest = (v.outCount - 1) % OUT_HISTORY;
     nowL = v.outL[newest];
     nowR = v.outR[newest];
-    const pkN = Math.min(count, PEAK_FRAMES);
-    for (let s = 0; s < pkN; s++) {
+    for (let s = 0; s < count; s++) {
       const i = (v.outCount - 1 - s) % OUT_HISTORY;
+      if (nowMs - v.outAt[i] > PEAK_HOLD_MS) break;
       if (v.outL[i] > pkL) pkL = v.outL[i];
       if (v.outR[i] > pkR) pkR = v.outR[i];
     }
@@ -328,7 +331,7 @@ function drawRingGlass(gl: Glass, v: UnitMeterView | undefined): boolean | null 
     const now = ch === 0 ? nowL : nowR;
     const pk = ch === 0 ? pkL : pkR;
     const c0 = now > 0 ? (20 * Math.log10(Math.max(1e-6, now)) - FLOOR) / dbc : -1;
-    const cp = pk > 0 ? Math.floor((20 * Math.log10(Math.max(1e-6, pk)) - FLOOR) / dbc) : -1;
+    const cp = pk > 0 ? Math.min(nc - 1, Math.floor((20 * Math.log10(Math.max(1e-6, pk)) - FLOOR) / dbc)) : -1;
     const x = MX + 3 + ch * 15;
     for (let k = 0; k < nc; k++) {
       const y = bot - (k + 1) * 4 + 1;
