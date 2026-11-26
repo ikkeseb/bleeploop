@@ -1,7 +1,7 @@
 /**
  * The unit faces as free-standing gear (`src/ui/units/UnitFace.tsx`, `face-place.ts`), the ECHO's own
- * face (`EchoFace.tsx`, its tape `echo-loop.ts`) and the RING MOD's own face (`RingFace.tsx`, its carrier
- * `ring-loop.ts`), driven as a player drives them on the browser fake's chain (`docs/unit-contract.md` §10,
+ * face (`EchoFace.tsx`, its tape `echo-loop.ts`) the REVERB's (`ReverbFace.tsx`, its glass `reverb-loop.ts`) and the
+ * RING MOD's (`RingFace.tsx`, its carrier `ring-loop.ts`), driven as a player drives them on the browser fake's chain (`docs/unit-contract.md` §10,
  * `src/platform/chain-fake.ts`), the chain asked for with `__lfChainFake`.
  *
  * - the ECHO face: a press on its plate's name opens it under the plate with no strap (no settings popover);
@@ -19,6 +19,14 @@
  *   dissimilar L and R each on its own half; scaled up while silent, the glass is drawn again at a larger
  *   backing size; a beats-only meter change redraws the silent ruler; closing the last face cancels its rAF;
  *   TIME's printed positions take a press while keeping TIME focus, never focusing inside aria-hidden;
+ * - the REVERB face: a press on its plate's name opens it under the plate with no strap; LEVEL by the keyboard,
+ *   a drag and a double press sends `SetUnitParam` and reads the feed's value (50 % the default); the power
+ *   switch is the unit's bypass, and the face shows it; scripted `unitMeters` frames light the glass, L above
+ *   the centre line and R below, and the sound slides toward the past, a frame without the unit clears it; a
+ *   right-only pulse and the silence after it, both between two draws, are drawn on R alone, dissimilar L and
+ *   R each on its own half, a lone loud frame runs off the glass in six seconds; scaled up while silent, the
+ *   glass is drawn again at a larger backing size; the fake's own signal follows LEVEL (a note's tail a cloud
+ *   at 100 %, a spike at 0 %); closing the last face cancels its rAF and the stage view queues no draw of it;
  * - the move: a drag on the face's panel moves it by the pointer's way with no strap, nothing is sent and
  *   the face stays open, its size not pinned (nor by a nudge), and a narrow-reflowed face keeps its fit on
  *   release without storing it; it keeps its place per kind (closed and opened again, it opens there; the
@@ -53,10 +61,11 @@
  *   queues no ring draw;
  * - per size (1920x1080, 2560x1440, 1000x700, 960x600): every face opens at home, no strap, every legend at
  *   12 px or more and none clipped (inside the face and inside every box that clips it), their controls
- *   reached by the pointer, the ECHO's tape and the RING MOD's carrier live on the fake's timer.
+ *   reached by the pointer, the ECHO's tape, the REVERB's glass and the RING MOD's carrier live on the fake's timer.
  *
- * `--shots=<dir>` writes both faces open at home and moved at 1920x1080 and 1000x700
- * (`<echo|ott>-<home|moved>-<W>x<H>.png`), each size's OTT and ECHO at home, and both faces open at once at
+ * `--shots=<dir>` writes each face open at home and moved at 1920x1080 and 1000x700
+ * (`<echo|ott|reverb>-<home|moved>-<W>x<H>.png`), each size's faces at home, each face shrunk to its narrow
+ * layout at 1920x1080 (`<kind>-narrow-1920x1080.png`), and the OTT and the ECHO open at once at
  * 1920x1080 (`both-faces-1920x1080.png`). Each check is soft (`check`): a
  * run reports every red one, then fails. Cannot see the native engine (it does not speak the chain yet)
  * or any sound.
@@ -142,8 +151,9 @@ await probe(async ({ open }) => {
     const shot = (name) => (SHOTS ? page.screenshot({ path: `${SHOTS}/${name}-${W}x${H}.png` }) : null);
     const echoFace = () => page.getByRole('dialog', { name: 'ECHO, slot A' });
     const ottFace = () => page.getByRole('dialog', { name: 'OTT, slot A' });
+    const reverbFace = () => page.getByRole('dialog', { name: 'REVERB, slot A' });
     const ringFace = () => page.getByRole('dialog', { name: 'RING MOD, slot A' });
-    const faceOf = (kind) => (kind === 'echo' ? echoFace() : kind === 'ring' ? ringFace() : ottFace());
+    const faceOf = (kind) => (kind === 'echo' ? echoFace() : kind === 'ring' ? ringFace() : kind === 'reverb' ? reverbFace() : ottFace());
     /** Open `kind`'s face from its plate's name, unless it is open (a red check before may have closed it). */
     const openFace = async (kind) => {
       const face = faceOf(kind);
@@ -300,6 +310,30 @@ await probe(async ({ open }) => {
         return { litL: upper.count, lobesL: upper.lobes, litR: lower.count, markerX, meter: cell(MX + 5), meterR: cell(MX + 20) };
       }, frac);
 
+    /** The REVERB's glass: the columns its body lights at `frac` of the way from the centre line to 0 dBFS
+     * (the dB lines and the centre line stay under a sixth of full alpha, the body well over), L above the
+     * centre line and R below. */
+    const room = (frac = 0.89) =>
+      page.evaluate((frac) => {
+        const cv = document.querySelector('.reverb__canvas');
+        const d = cv.width / cv.clientWidth;
+        const W = cv.clientWidth;
+        const narrow = cv.clientHeight < 200;
+        const X1 = W - 34;
+        const YC = narrow ? 80 : 110;
+        const HALF = narrow ? 56 : 84;
+        const ctx = cv.getContext('2d');
+        const litOn = (y) => {
+          const r = ctx.getImageData(0, Math.round(y * d), cv.width, 1).data;
+          const out = [];
+          for (let x = 46; x < X1 - 2; x++) if (r[Math.round(x * d) * 4 + 3] > 60) out.push(x);
+          return out;
+        };
+        const lit = litOn(YC - frac * HALF);
+        const litR = litOn(YC + frac * HALF);
+        return { lit, litR, newest: lit.length ? Math.max(...lit) : null };
+      }, frac);
+
     /** A page of its own at `viewport` with the ECHO's face open in slot A; `kept` is stored as `lf.unitFaces`
      * before the app loads (none: whatever the page keeps stays, so a reload keeps what a move saved). */
     const freshFace = async (viewport, keptJson) => {
@@ -327,10 +361,11 @@ await probe(async ({ open }) => {
       await p2.waitForTimeout(120);
     };
 
-    // the scene: an OTT, an ECHO and a RING MOD in slot A
+    // the scene: an OTT, an ECHO and a REVERB in slot A (the RING MOD joins at its own checks: four plates
+    // in slot A would fold slot B away at the sizes the slot B checks run at)
     await add('OTT');
     await add('ECHO');
-    await add('RING MOD');
+    await add('REVERB');
 
     if (first) {
       await check('the ECHO face: a press on the plate’s name opens it under the plate, with no strap', async () => {
@@ -687,6 +722,190 @@ await probe(async ({ open }) => {
         const t4 = await rulerTicks();
         await page.evaluate(() => (window.__lf.native.chain.meterTimer = true));
         assert.ok(t4 > t2 + 2, `ruler ticks grew when meter changed 6/8 (2 beats) -> 4/4 (4 beats) at 120 BPM: ${t2} -> ${t4}`);
+      });
+      // ── the REVERB's face: the room (ReverbFace.tsx, its glass reverb-loop.ts) ──
+      /** The room at rest: the fake's timer off, a frame without the unit, the glass empty. */
+      const hush = async () => {
+        await page.evaluate(() => (window.__lf.native.chain.meterTimer = false));
+        await emit({ unitMeters: [] });
+        await page.waitForTimeout(300);
+        assert.deepEqual((await room(0.3)).lit, [], 'empty to start');
+      };
+      /** `out` held on `unit` for `ms`: a frame every 16 ms from inside the page, so the glass has a plateau to
+       * measure (a few frames in a row are a spike a pixel wide at its top). */
+      const sustain = async (unit, out, ms = 320) => {
+        const n = Math.round(ms / 16);
+        await page.evaluate(
+          async ([id, o, seq0, n]) => {
+            for (let i = 0; i < n; i++) {
+              window.__lf.native.emit({ seq: seq0 + i, reset: false, events: [], unitMeters: [{ unit: id, out: o }] });
+              await new Promise((r) => setTimeout(r, 16));
+            }
+          },
+          [unit, out, seq + 1, n],
+        );
+        seq += n;
+      };
+      await check('the REVERB face: a press on the plate’s name opens it under the plate, with no strap', async () => {
+        await openFace('reverb');
+        assert.equal(await page.locator('.infx-pop').count(), 0, 'no settings popover');
+        const fb = await reverbFace().boundingBox();
+        const pb = await plate(await unitOf('reverb')).boundingBox();
+        assert.ok(fb.y > pb.y + pb.height && fb.y < pb.y + pb.height + 30, `under the plate: face top ${fb.y}, plate foot ${pb.y + pb.height}`);
+        assert.equal(await page.locator('.uface-tie').count(), 0, 'no strap drawn between plate and face');
+        assert.deepEqual(await reverbFace().getByRole('slider').evaluateAll((els) => els.map((e) => e.getAttribute('aria-label'))), ['REVERB level']);
+        await page.locator('.reverb .uface__close').click();
+        await settle();
+        assert.equal(await reverbFace().count(), 0, 'its close closes it');
+      });
+      await check('the REVERB face: LEVEL sends SetUnitParam and reads the feed’s value', async () => {
+        await openFace('reverb');
+        const reverb = await unitOf('reverb');
+        const level = page.getByRole('slider', { name: 'REVERB level' });
+        const lastLevel = async () => (await sent()).filter((c) => c.SetUnitParam?.[0] === reverb && c.SetUnitParam[1] === 'reverbLevel').at(-1)?.SetUnitParam[2];
+        const fed = async () => (await chains())[0].units.find((u) => u.id === reverb).params?.reverbLevel;
+        assert.equal(await level.getAttribute('aria-valuenow'), '50', 'the engine’s default, 50 %');
+        await level.focus();
+        await page.keyboard.press('End');
+        await settle();
+        assert.equal(await lastLevel(), 1, 'End: 1');
+        assert.equal(await fed(), 1, 'the fake took it');
+        assert.equal(await level.getAttribute('aria-valuenow'), '100');
+        await page.keyboard.press('ArrowDown');
+        await settle();
+        assert.equal(await lastLevel(), 0.99);
+        assert.equal(await fed(), 0.99);
+        assert.match(await page.locator('.reverb .uface__val').textContent(), /^99\s*%$/, 'the read-out');
+        await page.keyboard.press('Home');
+        await settle();
+        assert.equal(await fed(), 0, 'Home: 0');
+        const lb = await level.boundingBox();
+        await drag(lb.x + lb.width / 2, lb.y + lb.height / 2, 0, -44, 4);
+        const took = await fed();
+        assert.ok(took > 0.15 && took < 0.25, `a 44 px drag up lifts LEVEL by about 0.2 (took ${took})`);
+        assert.match(await page.locator('.reverb .uface__val').textContent(), new RegExp(`^${Math.round(took * 100)}`));
+        await level.dblclick();
+        await settle();
+        assert.equal(await fed(), 0.5, 'a double press: the default');
+      });
+      await check('the REVERB face: the power switch is the unit’s bypass, and the face shows it', async () => {
+        await openFace('reverb');
+        const reverb = await unitOf('reverb');
+        const pwr = page.locator('.reverb .uface__pwr');
+        assert.equal(await pwr.getAttribute('aria-pressed'), 'true');
+        await pwr.click();
+        await settle();
+        assert.ok((await sent()).some((c) => c.Action?.ToggleUnit === reverb), 'ToggleUnit sent');
+        assert.equal((await chains())[0].units.find((u) => u.id === reverb).bypass, true, 'the fake bypassed it');
+        assert.equal(await pwr.getAttribute('aria-pressed'), 'false');
+        assert.ok(await page.locator('.reverb').evaluate((e) => e.classList.contains('uface--byp')), 'the face drawn bypassed');
+        await page.waitForTimeout(400);
+        assert.equal(await page.locator('.reverb .reverb__canvas').evaluate((e) => getComputedStyle(e).opacity), '0.4', 'its glass sits back');
+        await pwr.click();
+        await settle();
+        assert.equal(await pwr.getAttribute('aria-pressed'), 'true', 'on again');
+      });
+      await check('the REVERB face: scripted unitMeters light the glass, the sound slides into the past, and a frame without the unit clears it', async () => {
+        await openFace('reverb');
+        const reverb = await unitOf('reverb');
+        await page.evaluate(() => (window.__lf.native.chain.meterTimer = false));
+        await emit({ unitMeters: [] });
+        await page.waitForTimeout(300);
+        assert.deepEqual((await room()).lit, [], 'the glass empty without frames');
+        await sustain(reverb, [0.9, 0.8]);
+        await page.waitForTimeout(100);
+        const a = await room(0.8);
+        assert.ok(a.newest !== null, 'the frames light the glass');
+        assert.ok(a.litR.length > 0, 'R lit below the centre line');
+        await page.waitForTimeout(500);
+        const b = await room(0.8);
+        const moved = a.newest - b.newest;
+        // six seconds over the glass's 772 px: 129 px a second, so about 64 px in half a second
+        assert.ok(moved > 40 && moved < 90, `the sound slid toward the past by ${moved} px (from ${a.newest} to ${b.newest})`);
+        await emit({ unitMeters: [] });
+        await page.waitForTimeout(150);
+        const cleared = await room(0.3);
+        assert.deepEqual(cleared.lit, [], 'a frame without the unit clears the L body');
+        assert.deepEqual(cleared.litR, [], 'a frame without the unit clears the R body');
+        await page.evaluate(() => (window.__lf.native.chain.meterTimer = true));
+      });
+      await check('the glass: a right-only pulse and the silence after it, both before the next draw, are drawn (R; L dark)', async () => {
+        await openFace('reverb');
+        await hush();
+        const reverb = await unitOf('reverb');
+        // two frames in one task: no draw between them
+        await page.evaluate(
+          ([id, seq]) => {
+            const f = (n, out) => ({ seq: n, reset: false, events: [], unitMeters: [{ unit: id, out }] });
+            window.__lf.native.emit(f(seq + 1, [0, 0.9]));
+            window.__lf.native.emit(f(seq + 2, [0, 0]));
+          },
+          [reverb, seq],
+        );
+        seq += 2;
+        await page.waitForTimeout(120);
+        const t = await room(0.3);
+        assert.ok(t.litR.length > 0, 'the pulse drawn on R');
+        assert.deepEqual(t.lit, [], 'nothing on L');
+        await page.evaluate(() => (window.__lf.native.chain.meterTimer = true));
+      });
+      await check('the glass: dissimilar L and R are drawn each on its own half', async () => {
+        await openFace('reverb');
+        await hush();
+        const reverb = await unitOf('reverb');
+        await sustain(reverb, [0.9, 0.02]);
+        await page.waitForTimeout(100);
+        const hi = await room(0.8);
+        assert.ok(hi.lit.length > 0 && hi.litR.length === 0, `near full scale: L lit (${hi.lit.length}), R not (${hi.litR.length})`);
+        const lo = await room(0.3);
+        assert.ok(lo.litR.length > 0, 'R lit lower down');
+        await emit({ unitMeters: [] });
+        await page.evaluate(() => (window.__lf.native.chain.meterTimer = true));
+      });
+      await check('the glass: a lone loud frame is drawn and runs off the glass in six seconds', async () => {
+        await openFace('reverb');
+        await hush();
+        const reverb = await unitOf('reverb');
+        await emit({ unitMeters: [{ unit: reverb, out: [0.7, 0.7] }] });
+        await page.waitForTimeout(100);
+        assert.ok((await room(0.3)).lit.length > 0, 'a lone frame drawn');
+        await page.waitForTimeout(6500);
+        assert.deepEqual((await room(0.3)).lit, [], 'six seconds on, it has run off the glass');
+        await page.evaluate(() => (window.__lf.native.chain.meterTimer = true));
+      });
+      await check('the glass: scaled up while silent, it is drawn again at a larger backing size', async () => {
+        await atHome('reverb');
+        await hush();
+        const before = await page.locator('.reverb__canvas').evaluate((cv) => cv.width);
+        await reverbFace().focus();
+        for (let k = 0; k < 3; k++) await page.keyboard.press('+');
+        await page.waitForTimeout(200);
+        const r = await page.locator('.reverb__canvas').evaluate((cv) => ({ backing: cv.width, shown: cv.getBoundingClientRect().width * devicePixelRatio }));
+        assert.ok(r.backing > before, `backing grew: ${before} -> ${r.backing}`);
+        assert.ok(Math.abs(r.backing - r.shown) <= 2, `backing ${r.backing} px for ${r.shown.toFixed(1)} px shown`);
+        await page.keyboard.press('Home');
+        await page.evaluate(() => (window.__lf.native.chain.meterTimer = true));
+      });
+      await check('the fake’s signal: a note’s tail follows LEVEL (a cloud at 100 %, a spike at 0 %)', async () => {
+        await openFace('reverb');
+        const level = page.getByRole('slider', { name: 'REVERB level' });
+        await level.focus();
+        await page.evaluate(() => (window.__lf.native.chain.meterTimer = true));
+        const cloud = async (key) => {
+          await level.focus();
+          await page.keyboard.press(key);
+          await settle();
+          // a reset frame restarts the REVERB's line: its note sounds at the next tick
+          await emit({ reset: true, settings: [], events: emptyLanes() });
+          await page.waitForTimeout(1300);
+          return (await room(0.5)).lit.length;
+        };
+        const wet = await cloud('End');
+        const dry = await cloud('Home');
+        // at half the height (-30 dBFS): the 100 % tail holds it for most of a second, the dry note for a tenth
+        assert.ok(wet > 70 && dry < 45, `columns lit at half the height 1.3 s after a note: ${wet} at 100 %, ${dry} at 0 %`);
+        await level.dblclick();
+        await settle();
       });
       await check('the move: a drag on the panel moves the face with no strap, nothing sent, the face stays open, its size not pinned', async () => {
         await atHome('echo');
@@ -1181,11 +1400,11 @@ await probe(async ({ open }) => {
         await page.evaluate(() => document.querySelector('.slot--a .slot__id, .slot--a .slot__fold, .slot--a .plate__menu')?.focus());
         await settle();
         assert.equal(await page.locator('.slot-pop').count(), 0, 'the focus left the menu: it closed');
-        // a legacy row dialog: REVERB’s Parameters
-        await add('REVERB');
-        const reverb = await unitOf('reverb');
-        await plate(reverb).locator('.unit__name').click();
-        const dlg = page.getByRole('dialog', { name: 'REVERB parameters' });
+        // a legacy row dialog: a plugin's Parameters (the three built-in faces' kinds open faces)
+        await add('Fake Amp');
+        const amp = await unitOf('plugin');
+        await plate(amp).locator('.unit__name').click();
+        const dlg = page.getByRole('dialog', { name: 'Fake Amp parameters' });
         await dlg.waitFor({ timeout: 2000 });
         await settle();
         await page.evaluate(() => document.querySelector('.slot--a .slot__id, .slot--a .slot__fold, .slot--a .unit-add')?.focus());
@@ -1195,7 +1414,7 @@ await probe(async ({ open }) => {
         await settle();
         assert.equal(await dlg.count(), 0, 'Escape closes it');
         const cs = await chains();
-        cs[0].units = cs[0].units.filter((u) => u.id !== reverb);
+        cs[0].units = cs[0].units.filter((u) => u.id !== amp);
         await emit({ chains: cs });
         await settle();
         await closeFace();
@@ -1529,6 +1748,7 @@ await probe(async ({ open }) => {
           });
         }
       });
+      await add('RING MOD');
       // ── the RING MOD face ("the carrier") ──────────────────────────────────────────────────────────
       await check('the RING MOD face: a press on the plate’s name opens it under the plate, with no strap', async () => {
         await closeFace();
@@ -1723,7 +1943,85 @@ await probe(async ({ open }) => {
           });
         }
       });
+      await check('the REVERB draw loop cancels its queued frame on last close', async () => {
+        await atHome('reverb');
+        await page.evaluate(() => {
+          const origRaf = window.requestAnimationFrame.bind(window);
+          const origCancel = window.cancelAnimationFrame.bind(window);
+          window.__roomSpy = { origRaf, origCancel, lastId: 0, cancelled: [], ranAfter: 0, closed: false };
+          window.requestAnimationFrame = (cb) => {
+            const isRoom = String(cb).includes('drawRoom');
+            const id = origRaf((ts) => {
+              if (isRoom && window.__roomSpy.closed) window.__roomSpy.ranAfter++;
+              cb(ts);
+            });
+            if (isRoom) window.__roomSpy.lastId = id;
+            return id;
+          };
+          window.cancelAnimationFrame = (id) => {
+            window.__roomSpy.cancelled.push(id);
+            return origCancel(id);
+          };
+        });
+        try {
+          await page.waitForTimeout(80);
+          await page.locator('.reverb .uface__close').click();
+          await page.evaluate(() => {
+            window.__roomSpy.closed = true;
+          });
+          await page.waitForTimeout(100);
+          const res = await page.evaluate(() => ({ lastId: window.__roomSpy.lastId, cancelled: window.__roomSpy.cancelled, ranAfter: window.__roomSpy.ranAfter }));
+          assert.ok(res.lastId > 0 && res.cancelled.includes(res.lastId), `queued REVERB rAF ${res.lastId} cancelled: ${JSON.stringify(res.cancelled)}`);
+          assert.equal(res.ranAfter, 0, `no REVERB draw callback ran after close (${res.ranAfter})`);
+        } finally {
+          await page.evaluate(() => {
+            if (!window.__roomSpy) return;
+            window.requestAnimationFrame = window.__roomSpy.origRaf;
+            window.cancelAnimationFrame = window.__roomSpy.origCancel;
+            delete window.__roomSpy;
+          });
+        }
+      });
+      await check('stage view: the REVERB’s draw loop queues nothing while it hides the face, and draws again on exit', async () => {
+        await atHome('reverb');
+        await page.evaluate(() => {
+          const origRaf = window.requestAnimationFrame.bind(window);
+          window.__roomSpy = { origRaf, ran: 0 };
+          window.requestAnimationFrame = (cb) => {
+            const isRoom = String(cb).includes('drawRoom');
+            return origRaf((ts) => {
+              if (isRoom && window.__roomSpy) window.__roomSpy.ran++;
+              cb(ts);
+            });
+          };
+        });
+        try {
+          const ran = () => page.evaluate(() => window.__roomSpy.ran);
+          await page.waitForTimeout(120);
+          assert.ok((await ran()) > 0, 'premise: the glass draws while shown');
+          await reverbFace().focus();
+          await page.keyboard.press('b');
+          await page.locator('.sv').waitFor({ timeout: 2000 });
+          await settle();
+          const hidden0 = await ran();
+          await page.waitForTimeout(300);
+          assert.equal(await ran(), hidden0, 'no REVERB draw callback ran while the stage view hid the face');
+          await page.keyboard.press('b');
+          await page.locator('.sv').waitFor({ state: 'detached', timeout: 2000 });
+          await page.waitForTimeout(200);
+          assert.ok((await ran()) > hidden0, `the glass draws again after the stage view (${hidden0} -> ${await ran()})`);
+          assert.equal(await reverbFace().count(), 1, 'the face still open');
+        } finally {
+          await page.evaluate(() => {
+            if (!window.__roomSpy) return;
+            window.requestAnimationFrame = window.__roomSpy.origRaf;
+            delete window.__roomSpy;
+          });
+        }
+        await closeFace();
+      });
     }
+    if (!first) await add('RING MOD'); // the first size added it at its own checks
 
     // ── a fold: where the row shows one slot at a time, the other's plate folds away under an open face ──
     await show();
@@ -1852,7 +2150,7 @@ await probe(async ({ open }) => {
     }
 
     // ── per size: every face at home, type and clipping, reach, live glass ────────────────────────────
-    for (const kind of ['echo', 'ott', 'ring']) {
+    for (const kind of ['echo', 'ott', 'reverb', 'ring']) {
       await check(`${kind.toUpperCase()} at ${W}x${H}: at home, no strap, legends 12 px or more and none clipped, its controls in reach`, async () => {
         await openFace(kind);
         const sel = `.${kind}`;
@@ -1895,6 +2193,14 @@ await probe(async ({ open }) => {
             return n > 40;
           }, { timeout: 3000 });
           assert.ok((await ringGlass(0.55)).litL > 40, 'the carrier runs on the fake’s meters');
+        } else if (kind === 'reverb') {
+          // the default LEVEL, whatever an earlier check left; the fake's timer: a note and its tail light the glass
+          await page.evaluate(async (id) => {
+            const { sendEngine } = await import('/src/platform/index.ts');
+            sendEngine({ SetUnitParam: [id, 'reverbLevel', 0.5] });
+          }, await unitOf('reverb'));
+          await page.waitForTimeout(SHOTS ? 4500 : 500);
+          assert.ok((await room(0.5)).newest !== null, 'the room runs on the fake’s meters');
         } else if (SHOTS) await page.waitForTimeout(2500);
         await page.evaluate(() => document.activeElement?.blur());
         if (SHOTS) await shot(`${kind}-home`);
@@ -1917,6 +2223,16 @@ await probe(async ({ open }) => {
             return n > 40;
           }, { timeout: 3000 });
           await shot('ring-narrow');
+          await faceOf(kind).focus();
+          await page.keyboard.press('Home');
+          await settle();
+        } else if (SHOTS && W === 1920) {
+          // the narrow layout: shrunk by the key, the glass given time to run
+          await faceOf(kind).focus();
+          await page.keyboard.press('-');
+          await page.evaluate(() => document.activeElement?.blur());
+          await page.waitForTimeout(2500);
+          await shot(`${kind}-narrow`);
           await faceOf(kind).focus();
           await page.keyboard.press('Home');
           await settle();

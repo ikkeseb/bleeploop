@@ -6,7 +6,7 @@ import { faceLayer, plateOf, raiseFace, type FaceKind } from './face-store';
 import './unit-face.css';
 
 /**
- * A built-in unit's face, the frame every face shares (the OTT's, the ECHO's): one piece of gear opened
+ * A built-in unit's face, the frame every face shares (the OTT's, the ECHO's, the REVERB's, the RING MOD's): one piece of gear opened
  * from its plate (Parameters, or a press on its name), drawn by `FaceHost.tsx` while it is open
  * (`face-store.ts`). Free-standing: no backdrop, so the looper and the row under and beside it play as
  * ever, a press outside never closes it, a slot folded under it leaves it open where it stands, and another

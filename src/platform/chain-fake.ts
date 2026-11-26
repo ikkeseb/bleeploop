@@ -21,13 +21,14 @@
  *   an id that is not seated, a param of another kind or a SYNTH pick out of range is dropped and counted
  *   (`dropped`); a SYNTH pick (`InputEvent.pickSynth`) reaches the model as the router's `SetUnitParam`;
  * - the meters (§2): one per seated unit on every frame it makes; the faces' on the fake's own 60 Hz timer
- *   while an OTT, an ECHO or a RING MOD is seated and on: the OTT's bands from the accepted mockup's simulated guitar
+ *   while an OTT, an ECHO, a REVERB or a RING MOD is seated and on: the OTT's bands from the accepted mockup's simulated guitar
  *   part through the same curve (`docs/redesign/ott.js`, SIM-BEGIN to SIM-END), following its four params;
  *   the ECHO's `out` per channel from a plucked note on every bar's downbeat through an echo of its own
- *   params at the tempo the scripted frames set; the RING MOD's `out` per channel from a plucked note on
+ *   params at the tempo the scripted frames set; the REVERB's from the same downbeat note, short and dry, and
+ *   a tail of about 2.5 s (a 60 dB fall) that LEVEL scales, its two channels' tails a touch apart; the RING MOD's `out` per channel from a plucked note on
  *   every bar's downbeat modulated by its carrier at `ringFreq` and `ringLevel`;
  * - a reset frame carrying `chains` replaces the model and answers every call and held edit begun before it
- *   refused; one without carries the model; either restarts the OTTs' followers, the ECHOs' lines and the
+ *   refused; one without carries the model; either restarts the OTTs' followers, the ECHOs' and REVERBs' lines and the
  *   RING MODs' clocks.
 
  * Pure of DOM and Solid: a Node guard can import it (no timer starts at module load).
@@ -107,8 +108,8 @@ export interface ChainFake {
   closeWindow(unit: UnitId): void;
   /** Probe seam: the meters' own 60 Hz timer (on by default); off, `meterTick` emits one frame. */
   meterTimer: boolean;
-  /** Whether the 60 Hz interval is live now: only while the timer is on and an OTT, an ECHO or a RING MOD
-   * is seated and on. */
+  /** Whether the 60 Hz interval is live now: only while the timer is on and an OTT, an ECHO, a REVERB or a
+   * RING MOD is seated and on. */
   readonly meterTimerRunning: boolean;
   /** Emit one `unitMeters` frame now, one sixtieth of a second of the simulated part later. */
   meterTick(): void;
@@ -346,6 +347,44 @@ function ringFrame(frame: number, p: RingParams, tempo: Tempo): [number, number]
   return [peak, peak * 0.95];
 }
 
+// ── The REVERB face's signal: the same downbeat note, dry and short, and the room's tail behind it ──
+
+/** The tail's fall (s) for 60 dB, its share of the note's peak at LEVEL 1, its pre-delay and the time it
+ * takes to bloom (s). */
+const TAIL_RT60 = 2.5;
+const TAIL_SHARE = 0.6;
+const TAIL_PRE = 0.015;
+const TAIL_BLOOM = 0.07;
+/** The dry note through the reverb unit: a pluck that is gone in a third of a second. */
+const dryPluck = (d: number): number => (d < 0.005 ? d / 0.005 : 1) * (0.9 * Math.exp(-d / 0.045) + 0.1 * Math.exp(-d / 0.12));
+/** One channel's output of a REVERB (the note plus its tail, unit contract §5: `input + its wet part`) at
+ * `t` seconds, power-summed over the notes still ringing; `ch` sets the tail's slow ripple, so the two
+ * channels' tails differ a little and the dry note does not. */
+function reverbAmp(t: number, level: number, ch: 0 | 1, tempo: Tempo): number {
+  const bar = (60 / tempo.bpm) * tempo.beats;
+  let e2 = 0;
+  for (let n = Math.max(0, Math.floor((t - 4) / bar)); n * bar <= t; n++) {
+    const d = t - n * bar;
+    if (d < 1.5) e2 += (PLUCK * dryPluck(d)) ** 2;
+    if (d > TAIL_PRE && level > 0) {
+      const x = d - TAIL_PRE;
+      const ripple = 1 + 0.12 * Math.sin(x * (ch === 0 ? 31 : 37) + n) * Math.sin(x * (ch === 0 ? 17 : 13) + 2 * n);
+      e2 += (PLUCK * TAIL_SHARE * level * (1 - Math.exp(-x / TAIL_BLOOM)) * Math.exp((-x * Math.log(1000)) / TAIL_RT60) * ripple) ** 2;
+    }
+  }
+  return Math.sqrt(e2);
+}
+/** One feed frame (1/60 s) of a REVERB: its output's peak over the frame, per channel. */
+function reverbFrame(frame: number, level: number, tempo: Tempo): [number, number] {
+  const peak: [number, number] = [0, 0];
+  for (let s = 0; s < 8; s++) {
+    const t = (frame - 1 + (s + 1) / 8) / 60;
+    peak[0] = Math.max(peak[0], reverbAmp(t, level, 0, tempo));
+    peak[1] = Math.max(peak[1], reverbAmp(t, level, 1, tempo));
+  }
+  return peak;
+}
+
 // ── Tones (unit contract §1, §8): today's file, `src-tauri/src/host/tone.rs` `encode`/`decode` ─────────
 
 const TONE_MAGIC = [0x42, 0x4c, 0x54, 0x4e]; // "BLTN"
@@ -472,9 +511,9 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
   /** One structure call at a time per slot (unit contract §2). */
   const tails: [Promise<unknown>, Promise<unknown>] = [Promise.resolve(), Promise.resolve()];
   const sims = new Map<UnitId, OttSim>();
-  /** The last reading of each active OTT, ECHO and RING MOD: a `chains` frame repeats it, no time passing. */
+  /** The last reading of each active OTT, ECHO, REVERB and RING MOD: a `chains` frame repeats it, no time passing. */
   const lastBands = new Map<UnitId, UnitMeter>();
-  /** Each active ECHO's and RING MOD's frames run: their signal clocks. */
+  /** Each active ECHO's, REVERB's and RING MOD's frames run: their signal clocks. */
   const echoFrames = new Map<UnitId, number>();
   const ringFrames = new Map<UnitId, number>();
   /** Parked session tones by token (unit contract §8), each bound to its plugin and slot. */
@@ -1127,7 +1166,7 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
     } else if (f.reset) f.chains = snapshot();
     if (f.reset) {
       // Unit contract §3: a unit entering an engine resets its audio state: the OTT's followers restart, the
-      // ECHO's line empties.
+      // ECHO's line and the REVERB's tail empty.
       sims.clear();
       lastBands.clear();
       echoFrames.clear();
@@ -1139,7 +1178,7 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
 
   // ── The meters (unit contract §2, §10): one per seated unit; the faces' from their simulated parts ──
 
-  const active = (u: Unit) => (u.state.kind === 'ott' || u.state.kind === 'echo' || u.state.kind === 'ring') && sounding(u) && !u.state.bypass;
+  const active = (u: Unit) => (u.state.kind === 'ott' || u.state.kind === 'echo' || u.state.kind === 'reverb' || u.state.kind === 'ring') && sounding(u) && !u.state.bypass;
   function echoParams(u: Unit): EchoParams {
     const p = u.state.kind === 'echo' ? (u.state.params ?? {}) : {};
     return { time: Math.min(3, Math.max(0, Math.round(p.echoTime ?? 1))), feedback: p.echoFeedback ?? 0.4, level: p.echoLevel ?? 0.5 };
@@ -1157,26 +1196,30 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
     [0, 1, 2].map(() => ({ gain: 0, gainMin: 0, gainMax: 0, level: LEVEL_FLOOR, levelPeak: LEVEL_FLOOR })) as [BandMeter, BandMeter, BandMeter];
   /**
    * One meter per seated unit, chain order, slot A first (unit contract §2). The fake has no sound: a unit
-   * reads silent, an OTT that is bypassed reads its bands at rest; an active OTT, ECHO or RING MOD reads
-   * its simulated part, one sixtieth of a second further when `advance` (the timer's frame), else its last
-   * reading with no time passing (a `chains` frame between two ticks).
+   * reads silent, an OTT that is bypassed reads its bands at rest; an active OTT, ECHO, REVERB or RING MOD
+   * reads its simulated part, one sixtieth of a second further when `advance` (the timer's frame), else its
+   * last reading with no time passing (a `chains` frame between two ticks).
    */
   function meters(advance: boolean): UnitMeter[] {
     return all()
       .filter(sounding)
       .map((u): UnitMeter => {
         const unit = u.state.id;
-        // A bypassed ECHO or RING MOD reads silent here, though the engine's passes its dry (unit contract
-        // §5, Bypass): the fake models what the face draws (the glass at rest), not the sound.
+        // A bypassed ECHO, REVERB or RING MOD reads silent here, though the engine's passes its dry (and a REVERB
+        // rings its tail out; unit contract §5, Bypass): the fake models what the face draws (the glass at rest),
+        // not the sound.
         if (!active(u)) return u.state.kind === 'ott' ? { unit, out: [0, 0], bands: restBands() } : { unit, out: [0, 0] };
-        if (u.state.kind === 'echo') {
+        if (u.state.kind === 'echo' || u.state.kind === 'reverb') {
           if (!advance) {
             const last = lastBands.get(unit);
             return { unit, out: last ? [last.out[0], last.out[1]] : [0, 0] };
           }
           const n = (echoFrames.get(unit) ?? 0) + 1;
           echoFrames.set(unit, n);
-          const m: UnitMeter = { unit, out: echoFrame(n, echoParams(u), deps.tempo()) };
+          const m: UnitMeter = {
+            unit,
+            out: u.state.kind === 'echo' ? echoFrame(n, echoParams(u), deps.tempo()) : reverbFrame(n, u.state.params?.reverbLevel ?? 0.5, deps.tempo()),
+          };
           lastBands.set(unit, m);
           return m;
         }
@@ -1209,7 +1252,7 @@ export function createChainFake(deps: ChainFakeDeps): WiredChainFake {
     if (!all().some(active)) return;
     deps.deliver(frame({ unitMeters: meters(true) }));
   }
-  /** Run the timer exactly while it is on and an OTT, an ECHO or a RING MOD is seated and on (unit contract §10). */
+  /** Run the timer exactly while it is on and an OTT, an ECHO, a REVERB or a RING MOD is seated and on (unit contract §10). */
   function syncTimer(): void {
     const want = fake.meterTimer && deps.forced() && all().some(active);
     if (want && timer === null) timer = setInterval(tick, 1000 / 60);

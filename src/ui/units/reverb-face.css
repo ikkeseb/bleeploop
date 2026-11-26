@@ -1,0 +1,33 @@
+/* The REVERB's face (ReverbFace.tsx) on the family's frame (unit-face.css): the glass's print (the dB lines,
+   NOW, the seconds back, the channels; the canvas draws the body, the lines and the ruler,
+   reverb-loop.ts) and LEVEL, the one knob. */
+
+.reverb__db {
+  left: 6px;
+  width: 30px;
+  transform: translateY(-50%);
+  text-align: right;
+  font: 500 12px / 1 var(--font-num);
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+}
+.reverb__db.is-zero {
+  color: var(--legend);
+}
+.reverb__ago {
+  transform: translateX(-50%);
+  font: 500 12px / 1 var(--font-num);
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+}
+.reverb__now {
+  font: 600 12px / 1 var(--font-legend);
+  letter-spacing: 0.1em;
+  color: var(--legend);
+}
+.reverb__ch {
+  transform: translateX(-50%);
+  font: 600 12px / 1 var(--font-legend);
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
