@@ -1,0 +1,25 @@
+name: linux-audio-probe
+
+on:
+  push:
+    branches: [main, dev]
+    paths: ['verify/linux-audio/**', 'src-tauri/crates/lf-engine/**', 'src-tauri/rust-toolchain.toml', '.github/workflows/linux-audio-probe.yml']
+  pull_request:
+    branches: [main]
+    paths: ['verify/linux-audio/**', 'src-tauri/crates/lf-engine/**', 'src-tauri/rust-toolchain.toml', '.github/workflows/linux-audio-probe.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libjack-jackd2-dev
+      # Use the workspace toolchain pin and link the probe against the runner's libjack.
+      - run: cargo build --locked --manifest-path ../verify/linux-audio/Cargo.toml
+        working-directory: src-tauri

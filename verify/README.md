@@ -7,6 +7,9 @@ whole workspace; `.github/workflows/rust-test.yml` on native-code changes, `ci.y
 ubuntu). Neither directory reaches the native half, WebView2, real rig latency or anything audible;
 those are verified by running the app and measuring it (`docs/VERIFY.md`, `STATUS.md`).
 
+The standalone Rust crate in [linux-audio/](linux-audio/) exercises the native looper on JACK.
+For ports, invocation and the meaning of PASS, see [the Linux device probe](../docs/VERIFY.md#linux-jack-device-probe).
+
 | | `guards/` | `probes/` |
 |---|---|---|
 | Runs in | plain Node: no browser, no audio hardware | headless Chromium against the real UI on a Vite dev server, on the engine fake |

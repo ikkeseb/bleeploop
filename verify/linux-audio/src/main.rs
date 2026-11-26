@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 const BPM: f64 = 240.0;
 const MAX_BLOCK: usize = 8192;
 const DEVICE_GAIN: f32 = 0.05; // Hard ceiling: about -26 dBFS independent of engine settings.
+                               // Allow small differences in the master processing of live and looped audio.
+const MAX_REPLAY_RELATIVE_RMS: f64 = 0.05;
 const SIGNAL_FLOOR: f32 = 1.0e-5;
 const ROUTE_WARMUP: Duration = Duration::from_millis(500);
 
@@ -101,6 +103,27 @@ impl Window {
 }
 
 #[derive(Default)]
+struct ReplayError {
+    reference_energy: [f64; 2],
+    error_energy: [f64; 2],
+}
+
+impl ReplayError {
+    fn sample(&mut self, reference: [f32; 2], output: [f32; 2]) {
+        for ch in 0..2 {
+            let reference = f64::from(reference[ch]);
+            let error = f64::from(output[ch]) - reference;
+            self.reference_energy[ch] += reference * reference;
+            self.error_energy[ch] += error * error;
+        }
+    }
+
+    fn relative_rms(&self) -> [f64; 2] {
+        std::array::from_fn(|ch| (self.error_energy[ch] / self.reference_energy[ch]).sqrt())
+    }
+}
+
+#[derive(Default)]
 struct Report {
     callbacks: usize,
     min_block: usize,
@@ -110,6 +133,7 @@ struct Report {
     idle: Window,
     live: Window,
     loops: [Window; 2],
+    replay_error: [ReplayError; 2],
     stopped: Window,
 }
 
@@ -138,6 +162,8 @@ impl fmt::Display for Fault {
 struct Callback {
     engine: Engine,
     seq: Sequence,
+    live_bar: Vec<[f32; 2]>,
+    live_start: Frame,
     armed: Arc<AtomicBool>,
     result: Producer<Result<Report, Fault>>,
     report: Report,
@@ -209,10 +235,14 @@ impl Callback {
             let at = frame + i as Frame;
             let window = if at < self.seq.arm {
                 &mut self.report.idle
-            } else if at >= self.seq.record && at < self.seq.record + self.seq.bar {
+            } else if at >= self.live_start && at < self.live_start + self.seq.bar {
+                self.live_bar[(at - self.live_start) as usize] = [l, r];
                 &mut self.report.live
             } else if at >= self.seq.playback && at < self.seq.stop {
                 let cycle = (at - self.seq.playback) / self.seq.bar;
+                let offset = (at - self.seq.record) % self.seq.bar;
+                self.report.replay_error[cycle as usize]
+                    .sample(self.live_bar[offset as usize], [l, r]);
                 &mut self.report.loops[cycle as usize]
             } else if at >= self.seq.silent {
                 &mut self.report.stopped
@@ -283,7 +313,21 @@ fn run() -> Result<(), String> {
         );
     };
 
-    let mut device = jack::Client::open()?;
+    let device = jack::Client::open()?;
+    let events = Arc::clone(device.events());
+    let result = run_sequence(device, capture, left, right);
+    // JACK can retire the client before a link query returns. After close, its first callback
+    // fault takes precedence over any secondary connection or timeout error.
+    events.check_buffers()?;
+    result
+}
+
+fn run_sequence(
+    mut device: jack::Client,
+    capture: &str,
+    left: &str,
+    right: &str,
+) -> Result<(), String> {
     let capture = device.endpoint(capture, jack::OUTPUT)?;
     let left = device.endpoint(left, jack::INPUT)?;
     let right = device.endpoint(right, jack::INPUT)?;
@@ -316,6 +360,9 @@ fn run() -> Result<(), String> {
     let armed = Arc::new(AtomicBool::new(false));
     let (producer, mut report) = RingBuffer::new(1);
     let mut callback = Callback {
+        live_bar: vec![[0.0; 2]; seq.bar as usize],
+        // The live output carries the limiter delay that the looper compensates when recording.
+        live_start: seq.record + engine.limiter_latency(),
         engine,
         seq,
         armed: Arc::clone(&armed),
@@ -341,6 +388,7 @@ fn run() -> Result<(), String> {
     };
     let route_deadline = Instant::now() + Duration::from_secs(1);
     while !has_routes() {
+        device.events().check_buffers()?;
         if Instant::now() >= route_deadline {
             return Err("The requested JACK capture/playback links did not become active".into());
         }
@@ -352,6 +400,7 @@ fn run() -> Result<(), String> {
         ROUTE_WARMUP.as_millis()
     );
     thread::sleep(ROUTE_WARMUP);
+    device.events().check_buffers()?;
     if !has_routes() {
         return Err("A requested JACK route changed during warm-up".into());
     }
@@ -362,6 +411,7 @@ fn run() -> Result<(), String> {
     let start = Instant::now();
     armed.store(true, Ordering::Release);
     let report = loop {
+        events.check_buffers()?;
         lane.observe(&mut handle)?;
         if !has_routes() {
             return Err("A requested JACK route changed during the probe".into());
@@ -435,19 +485,36 @@ fn run() -> Result<(), String> {
             "Expected both JACK outputs to carry the live synth and two loop cycles".into(),
         );
     }
+    for (i, error) in report.replay_error.iter().enumerate() {
+        let rms = error.relative_rms();
+        println!("loop_{} relative_rms_error={rms:.5?}", i + 1);
+        if rms
+            .iter()
+            .any(|&value| !value.is_finite() || value > MAX_REPLAY_RELATIVE_RMS)
+        {
+            return Err(format!(
+                "Loop {} waveform differs from the live organ take",
+                i + 1
+            ));
+        }
+    }
     if [report.idle, report.stopped]
         .iter()
         .any(|window| window.frames != seq.rate / 4 || window.signal != [0; 2])
     {
         return Err("Expected silent JACK output before recording and after stop".into());
     }
-    println!("PASS: the native engine recorded and replayed the synth on the JACK device clock");
     Ok(())
 }
 
 fn main() -> std::process::ExitCode {
     match run() {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(()) => {
+            println!(
+                "PASS: the native engine recorded and replayed the synth on the JACK device clock"
+            );
+            std::process::ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("FAIL: {error}");
             std::process::ExitCode::FAILURE

@@ -106,10 +106,13 @@ If PipeWire's RTKit handoff kills the probe during startup, prefix the run comma
 The first 500 ms after the links activate are silent warm-up. The measured frame origin and xrun
 baseline begin after warm-up. A frame discontinuity or an xrun reported by JACK during the measured sequence fails the run.
 The probe plays at a maximum of −26 dBFS, records two built-in Organ notes into one fixed bar, then
-measures both outputs over two cycles after note release and checks for silence after stopping.
-It prints the device clock, capture peak, loop length and output peaks. The connected capture is
-read with monitoring off, so the take needs no cable. The result measures audio at the client
-ports. A sink monitor or physical loopback is needed to verify audio beyond those ports. This
+compares both stereo replays sample by sample to the live bar, accounting for the engine's master
+limiter delay. Each channel must stay within 5% relative RMS waveform error in each cycle. The
+probe also checks for silence after stopping.
+It prints the device clock, capture peak, loop length, output peaks and replay error. The connected capture is
+read with monitoring off. The built-in synth supplies the entire take. PASS also works on virtual
+ports and cannot establish that hardware ports were used. Check the device graph and record the
+sink monitor to verify the routed signal, or use a physical loopback to measure the analogue path. This
 probe uses zero latency compensation and leaves the Windows driver, plugin and by-ear checks to
 the rig below.
 

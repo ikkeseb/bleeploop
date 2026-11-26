@@ -2,7 +2,7 @@
 use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void, CStr, CString};
 use std::ptr::NonNull;
 use std::slice;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 
 const NO_START_SERVER: c_uint = 1;
@@ -73,6 +73,27 @@ pub struct DeviceEvents {
     pub xruns: AtomicU32,
     pub sample_rate: AtomicU32,
     pub freewheel: AtomicBool,
+    buffer_fault: AtomicU8,
+}
+
+const INVALID_BUFFER: u8 = 1;
+const OVERLAPPING_BUFFERS: u8 = 2;
+
+impl DeviceEvents {
+    fn reject_buffer(&self, fault: u8) -> c_int {
+        let _ = self
+            .buffer_fault
+            .compare_exchange(0, fault, Ordering::Relaxed, Ordering::Relaxed);
+        -1
+    }
+
+    pub fn check_buffers(&self) -> Result<(), &'static str> {
+        match self.buffer_fault.load(Ordering::Relaxed) {
+            0 => Ok(()),
+            OVERLAPPING_BUFFERS => Err("JACK callback rejected overlapping audio buffers"),
+            _ => Err("JACK callback received a null audio buffer or an invalid buffer size"),
+        }
+    }
 }
 
 pub struct Endpoint {
@@ -92,6 +113,7 @@ struct Callback {
     client: NonNull<RawClient>,
     ports: [NonNull<RawPort>; 3],
     process: Box<Process>,
+    events: Arc<DeviceEvents>,
 }
 
 fn check(operation: &str, code: c_int) -> Result<(), String> {
@@ -196,6 +218,7 @@ impl Client {
                 client: self.raw,
                 ports,
                 process: Box::new(process),
+                events: Arc::clone(&self.events),
             })));
             self.callback = Some(data);
             check(
@@ -219,7 +242,7 @@ impl Client {
         }
     }
 
-    pub fn events(&self) -> &DeviceEvents {
+    pub fn events(&self) -> &Arc<DeviceEvents> {
         &self.events
     }
 
@@ -261,18 +284,15 @@ extern "C" fn process_audio(frames: u32, state: *mut c_void) -> c_int {
         let [input, left, right] = state
             .ports
             .map(|port| jack_port_get_buffer(port.as_ptr(), frames).cast::<f32>());
-        let Some(bytes) = (frames as usize).checked_mul(size_of::<f32>()) else {
-            return -1;
-        };
-        if bytes > isize::MAX as usize
-            || input.is_null()
-            || left.is_null()
-            || right.is_null()
-            || input.addr().abs_diff(left.addr()) < bytes
+        let bytes = (frames as usize).saturating_mul(size_of::<f32>());
+        if bytes > isize::MAX as usize || input.is_null() || left.is_null() || right.is_null() {
+            return state.events.reject_buffer(INVALID_BUFFER);
+        }
+        if input.addr().abs_diff(left.addr()) < bytes
             || input.addr().abs_diff(right.addr()) < bytes
             || left.addr().abs_diff(right.addr()) < bytes
         {
-            return -1;
+            return state.events.reject_buffer(OVERLAPPING_BUFFERS);
         }
         // Output-only ports supply writable storage. Initialize it before borrowing it as f32.
         left.write_bytes(0, frames as usize);
