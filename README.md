@@ -5,8 +5,7 @@
 A looper for Windows that you play live: a guitar, a bass, a synth or a keyboard. Load your own amp-sim
 or instrument plugin, play through it live over ASIO, and build a song on five loop tracks, hands-free
 with a MIDI footswitch. Each take is placed from the latency the ASIO driver reports, so there is no
-latency setting to tune. That has been measured on one interface so far; see [Where it
-stands](#where-it-stands).
+latency setting to tune.
 
 
 [![Download for Windows](https://img.shields.io/github/v/release/ikkeseb/bleeploop?label=Download%20for%20Windows&logo=windows&style=for-the-badge&color=2ea043)](https://github.com/ikkeseb/bleeploop/releases/latest)
@@ -31,10 +30,8 @@ itself.
 
 - Windows 10 or 11, 64-bit. The installer fetches the WebView2 runtime if the machine lacks it.
 - An audio interface with an ASIO driver. WASAPI works as a fallback, but Windows and some drivers add
-  latency they do not report, so WASAPI takes can land late (about 215 ms on the Focusrite the
-  developer measured).
-- Your own plugin for the guitar's sound: CLAP, VST3 or 64-bit VST2. BleepLoop hosts it; it is not an
-  amp sim itself.
+  latency they do not report, so WASAPI takes can land late.
+- Your own plugin for the guitar's sound: CLAP, VST3 or 64-bit VST2.
 - Optional: a MIDI footswitch or keyboard. Without one, the computer keyboard runs the looper.
 
 ## Play it
@@ -63,8 +60,7 @@ itself.
 - Record, play, undo, mute, tap tempo, the click, FADE and the looper's other actions can be learned
   onto a MIDI footswitch, key or CC. A full-window stage view keeps
   the selected track, the bar, the beat and the count-in readable from where you stand.
-- Your loops are saved once they have held still for two seconds and come back when you reopen; a
-  crash before that save loses the last change. A jam exports as one zip: a WAV stem per track, a mix
+- Your loops are saved once they have held still for two seconds and come back when you reopen. A jam exports as one zip: a WAV stem per track, a mix
   and each plugin's settings.
 
 ### In the works
@@ -136,26 +132,12 @@ input, without the faces.*
 
 ## Where it stands
 
-This is an early release from one maintainer, played by the maintainer and a few testers.
+An early release from one maintainer, played by the maintainer and a few testers. Much of it is proven
+by tests but not yet played in a real jam.
 
-What held, measured on the developer's previous rig (a Focusrite Scarlett 2i2 3rd gen, ASIO,
-44.1 kHz, a cable from the output back into the input):
-
-- The guitar's round trip through the app and the interface was 8.1 ms at a 64-sample buffer and
-  15.1 ms at 128.
-- A take landed within 0.1 ms of where the driver's own latency report says it should, with no trim
-  setting, and stayed put over ten minutes.
-- An amp-sim plugin (Archetype Petrucci X) ran 120 s at buffer 128 and 256 with no dropouts.
-
-What is rough:
-
-- Only that one interface has had its timing and latency measured. The developer's current one (an
-  Audient EVO 4) passes the release's smoke test, input included, but its timing is not measured yet.
-  A report of how it runs on yours (interface, buffer size, what you heard) is welcome as an issue.
-- Much of the feature list is proven by tests but has not yet been played by ear in a real jam.
-  `STATUS.md` lists what has and has not.
-- WASAPI takes land late on drivers that hide their latency (see above). ASIO is the path to use.
-- The installer is unsigned, so SmartScreen warns on first run.
+Timing and latency were measured over ASIO on the developer's previous interface ([the
+figures](docs/ARCHITECTURE.md)). The current one, an Audient EVO 4, runs it but is not measured. How
+it runs on yours (the interface, the buffer size, what you heard) is welcome as an issue.
 
 What it is not:
 
