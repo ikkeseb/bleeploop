@@ -10,7 +10,7 @@ import type { UnitId } from '../../platform';
  * moves under the focus or a pointer's capture).
  */
 
-export type FaceKind = 'ott' | 'echo';
+export type FaceKind = 'ott' | 'echo' | 'reverb';
 export interface OpenFace {
   unit: UnitId;
   kind: FaceKind;

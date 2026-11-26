@@ -417,10 +417,10 @@ function UnitPlate(props: {
     });
   });
 
-  // the OTT and the ECHO open their own face (`FaceHost.tsx`), free-standing; the rest their popover
+  // the OTT, the ECHO and the REVERB open their own face (`FaceHost.tsx`), free-standing; the rest their popover
   const face = (): FaceKind | null => {
     const k = u().kind;
-    return k === 'ott' || k === 'echo' ? k : null;
+    return k === 'ott' || k === 'echo' || k === 'reverb' ? k : null;
   };
   const isOpen = () => (face() ? faceOpen(u().id) : pop.open());
   const openParams = () => {
