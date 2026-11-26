@@ -8,8 +8,8 @@ Full builds write the two H.264/AAC cuts and the 1920 × 1080 hero to `deliverab
 
 100 BPM, 4/4, four bars per revolution, 25 fps. The film plays the loop twice. Picked bass is present at frame 0. Drums lock at frame 120 (4.80 s), glass keys at frame 240 (9.60 s). Their first appearance in the shot leads their landing by seven frames.
 
-- **Bass** uses the opening four bars of Rack’s *Leave me a part* player take, from `prototype/leave-me-a-part` at `54a4aef`. The score plays Karoryfer’s Black And Blue Basses picked-bass samples (CC0). The included FLAC is the mono, lossless excerpt.
-- **Drums** are an original part played with four Rack synthwave one-shots. Rack’s `public/samples/SAMPLES.md` identifies them as public-domain, project-generated sounds.
+- **Bass** uses the opening four bars of Rack’s *Leave me a part* player take, from `prototype/leave-me-a-part` at Rack revision `54a4aef5de9e8938bff2ee55d219519e00f45622`. The score plays Karoryfer’s Black And Blue Basses picked-bass samples (CC0). The included FLAC is the mono, lossless excerpt.
+- **Drums** are an original part played with four Rack synthwave one-shots. Rack’s sample catalogue identifies them as public-domain, project-generated sounds.
 - **Keys** are an original stereo FM phrase. Its E minor and C voicings follow the bass. A tempo-synced alternating delay wraps around the loop.
 
 Each take contains 423,360 stereo PCM samples per channel. Each of the 960 sections spans 441 samples. For each section, the light-facing radius follows the normalized peak of the stereo magnitude, and the height follows both that peak and the normalized RMS. Frame zero is at twelve o’clock. The read arm moves clockwise and returns to the first sample on frame 240. A short peak/RMS envelope flexes each playing ring and sets the brightness and trail length of its pickup light. The compositor addresses the 960 sections by triangle so the light travels on every output frame.
