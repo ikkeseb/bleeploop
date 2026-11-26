@@ -85,6 +85,34 @@ router (the fake records it in `__lf.native.inputSent`; native MIDI's events are
   session cannot hijack mid-probe.
 - `file://` is BLOCKED in Playwright (mockups need `python3 -m http.server 8765`).
 
+## Linux JACK device probe
+
+The standalone crate in `verify/linux-audio/` runs `lf-engine` in one duplex JACK callback.
+It requires an existing hardware-backed JACK or PipeWire session and the system libjack development
+library. Use `pw-jack jack_lsp -p` (or `jack_lsp -p` on JACK) to find a capture output and two
+distinct playback inputs on the rig. PipeWire device profiles may expose them through virtual ports.
+Pass the full names explicitly. The probe adds and removes only its own JACK client and links.
+
+```sh
+mise exec rust@1.96.0 -- cargo build --release --locked \
+  --manifest-path verify/linux-audio/Cargo.toml --target-dir /tmp/bleeploop-linux-audio-target
+timeout -k 2s 12s pw-jack /tmp/bleeploop-linux-audio-target/release/bleeploop-linux-audio-probe \
+  'CAPTURE_PORT' 'PLAYBACK_LEFT' 'PLAYBACK_RIGHT'
+```
+
+If PipeWire's RTKit handoff kills the probe during startup, prefix the run command with
+`DISABLE_RTKIT=1` to bypass RTKit in that process. That run measures the resulting scheduling mode.
+
+The first 500 ms after the links activate are silent warm-up. The measured frame origin and xrun
+baseline begin after warm-up. A frame discontinuity or an xrun reported by JACK during the measured sequence fails the run.
+The probe plays at a maximum of −26 dBFS, records two built-in Organ notes into one fixed bar, then
+measures both outputs over two cycles after note release and checks for silence after stopping.
+It prints the device clock, capture peak, loop length and output peaks. The connected capture is
+read with monitoring off, so the take needs no cable. The result measures audio at the client
+ports. A sink monitor or physical loopback is needed to verify audio beyond those ports. This
+probe uses zero latency compensation and leaves the Windows driver, plugin and by-ear checks to
+the rig below.
+
 ## Native / Tauri verification (PC only)
 
 These commands run on Windows node, and from WSL through the `pnpm` wrapper:
