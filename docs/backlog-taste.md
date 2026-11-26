@@ -43,6 +43,10 @@ added a line.
   "This session used X in slot B": enough, or offer to load it?
 - **The master meter reads weak (the owner's eye on the running app, 2026-11-20, not urgent):** the
   ladder and its scale (-48 … 0) beside the master knob; which of the two he means is unread.
+- **The REVERB and RING MOD faces (unseen, an agent's design; the browser rig and `lf.chainNative` only):**
+  REVERB shows its output's last 6 s as one body under one LEVEL knob; RING MOD its carrier at FREQ on a log
+  ruler, FREQ in whole Hz with the nearest note. Siblings of the OTT's and the ECHO's? Is the empty right of
+  the REVERB's knob row fine, and does RING MOD's dim sine at rest read as "on, silent"?
 - **MIDI learn row:** is "latching" clear to a guitarist? A long binding list makes the popover tall.
 
 ## By ear, when convenient
