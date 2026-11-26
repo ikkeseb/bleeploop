@@ -1,7 +1,7 @@
 // verify/guards/stage-draw.mjs — invariant 6 for the 60 fps draw loops, the stage view's
 // (src/ui/stage/), the looper's (src/ui/looper/waveform.ts), the tuner's (src/ui/tuner/) and the unit
 // faces' (src/ui/units/: `ott-loop.ts`, the OTT face's glass and its plate's miniature; `echo-loop.ts`,
-// the ECHO face's tape): each reads a plain feed and
+// the ECHO face's tape; `reverb-loop.ts`, the REVERB's glass; `ring-loop.ts`, the RING MOD's carrier): each reads a plain feed and
 // the looper's non-reactive getters, never a Solid signal.
 //
 // A static check of the real source. A loop's draw modules are everything its roots reach through
@@ -10,7 +10,7 @@
 // either), and the looks it draws (`wave-looks.ts`); for the tuner, `tuner-loop.ts` and the pitch
 // arithmetic it calls (`TunerView.tsx`, its Solid side, hands it a callback it calls when the note, the
 // in-tune or the no-signal state changes); for the faces, `ott-loop.ts`, `echo-loop.ts` (its view a plain
-// object the face's Solid side writes), the echo's time arithmetic (`echo-time.ts`) and the units' plain
+// object the face's Solid side writes), `reverb-loop.ts`, `ring-loop.ts` (its params a plain view too), the echo's time arithmetic (`echo-time.ts`) and the units' plain
 // meter mirror (`unit-meters.ts`, which the engine store writes from the feed). Each
 // may import only its siblings and, from `../state/audio`, the looper facade,
 // `PEAK_FRAMES` and types; none may import `solid-js`; and on the looper facade it may touch only the
@@ -47,7 +47,7 @@ const STAGE = { dir: 'stage', roots: ['stage-loop', 'views'], audio: new Set(AUD
 const TUNER = { dir: 'tuner', roots: ['tuner-loop'], audio: new Set([...AUDIO, 'TunerReading']), named: {}, gated: null };
 /** The unit faces' loops (the OTT's glass and plate miniature, the ECHO's tape): no exception, nothing from
  * the looper. */
-const OTT = { dir: 'units', roots: ['ott-loop', 'echo-loop'], audio: new Set(), named: {}, gated: null };
+const OTT = { dir: 'units', roots: ['ott-loop', 'echo-loop', 'reverb-loop', 'ring-loop'], audio: new Set(), named: {}, gated: null };
 /** The looper's loop, with its bar grid's tempo read (the header). */
 const LOOPER = {
   dir: 'looper',
@@ -246,7 +246,7 @@ check('the looper walk holds waveform.ts and its looks, not its Solid-side sibli
 const tunerLoop = walk(TUNER);
 const ottLoop = walk(OTT);
 check('the faces walk holds their loops, the echo time and the meter mirror, not their Solid side', () =>
-  assert.deepStrictEqual([...ottLoop.keys()].sort(), ['echo-loop', 'echo-time', 'ott-loop', 'unit-meters']));
+  assert.deepStrictEqual([...ottLoop.keys()].sort(), ['echo-loop', 'echo-time', 'ott-loop', 'reverb-loop', 'ring-loop', 'unit-meters']));
 check('the tuner walk holds its loop and the pitch arithmetic', () => assert.deepStrictEqual([...tunerLoop.keys()].sort(), ['pitch', 'tuner-loop']));
 
 console.log(`stage-draw: ${[...stage.keys()].sort().join(', ')}; looper: ${[...looperLoop.keys()].join(', ')}; tuner: ${[...tunerLoop.keys()].sort().join(', ')}; faces: ${[...ottLoop.keys()].sort().join(', ')}`);

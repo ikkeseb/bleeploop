@@ -2,7 +2,7 @@
    docs/redesign/ott.css draws it, on the app.css header's tokens: one piece of gear, 900x540, its glass on
    top, its name, power switch and maker's mark at its foot left, programmed knobs on one row (the owner
    chose them over a rendered cap). Each face's own (its glass, its knobs' places) is in its own sheet
-   (ott-face.css, echo-face.css). It opens hanging under the slot row from its plate; the player moves it
+   (ott-face.css, echo-face.css, reverb-face.css). It opens hanging under the slot row from its plate; the player moves it
    and scales it from its corner grip; free-standing, it lets every press beside it through. Where the window cannot hold it, it reflows narrow (`.uface--narrow`,
    900x382), never scaling its type under the base size. */
 

@@ -4,7 +4,7 @@
  * read them. No Solid: a frame of meters, up to 60 a second, writes no signal, and the loop reading it
  * subscribes to nothing (invariant 6). Per unit a ring of the last `HISTORY` frames of each band's gain
  * range, so the OTT's face draws the last three seconds, and a ring of the last `OUT_HISTORY` frames of its
- * output peak per channel, each stamped with when it arrived, so the ECHO's tape lays them on time;
+ * output peak per channel, each stamped with when it arrived, so the ECHO's tape, the REVERB's room and the RING MOD's carrier lay them on time;
  * `version` moves on every frame, so a loop draws only what changed.
  */
 

@@ -1,0 +1,64 @@
+/* The RING MOD's face (RingFace.tsx) on the family's frame (unit-face.css): the carrier glass on top
+   (sine at FREQ with output energy riding on it, log 20 Hz–1.5 kHz ruler, stereo OUT ladders; drawn by
+   ring-loop.ts), and FREQ (hero, log Hz with nearest note) + LEVEL under it. */
+
+.ring__cap {
+  font: 600 12px / 1 var(--font-legend);
+  letter-spacing: 0.1em;
+  color: var(--dim);
+}
+.ring__read {
+  transform: translateX(-100%);
+  text-align: right;
+  font: 500 16px / 1 var(--font-num);
+  font-variant-numeric: tabular-nums;
+  color: var(--engaged);
+}
+.ring__read .uface__u {
+  color: color-mix(in srgb, var(--engaged) 65%, var(--faint));
+}
+.ring__g-note {
+  margin-left: 0.35em;
+  font: 500 13px / 1 var(--font-num);
+  color: color-mix(in srgb, var(--engaged) 78%, var(--legend));
+}
+.ring__ch {
+  transform: translateX(-50%);
+  font: 600 12px / 1 var(--font-legend);
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+.ring__out {
+  font: 600 12px / 1 var(--font-legend);
+  letter-spacing: 0.1em;
+  color: var(--legend);
+}
+.ring__hz {
+  transform: translateX(-50%);
+  font: 500 12px / 1 var(--font-num);
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+}
+.ring__hz--left {
+  transform: none;
+}
+.ring__hz--right {
+  transform: translateX(-100%);
+}
+
+/* FREQ's nearest-note annotation beside its Hz/kHz read-out */
+.ring .uface__note {
+  margin-left: 0.35em;
+  font-size: 15px;
+  color: var(--legend);
+  transition: color var(--motion);
+}
+.ring .uface__val.is-adjusting .uface__note {
+  color: var(--engaged);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ring .uface__note {
+    transition: none;
+  }
+}

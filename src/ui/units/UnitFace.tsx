@@ -6,7 +6,7 @@ import { faceLayer, plateOf, raiseFace, type FaceKind } from './face-store';
 import './unit-face.css';
 
 /**
- * A built-in unit's face, the frame every face shares (the OTT's, the ECHO's): one piece of gear opened
+ * A built-in unit's face, the frame every face shares (the OTT's, the ECHO's, the REVERB's, the RING MOD's): one piece of gear opened
  * from its plate (Parameters, or a press on its name), drawn by `FaceHost.tsx` while it is open
  * (`face-store.ts`). Free-standing: no backdrop, so the looper and the row under and beside it play as
  * ever, a press outside never closes it, a slot folded under it leaves it open where it stands, and another
@@ -297,18 +297,36 @@ interface KnobGeo {
   y: number;
   size: number;
 }
-/** A knob on a face: the param it sends, its legend and accessible name, its default and its top (the
- * engine's ceiling: FEEDBACK's 0.95), its centre and size on the full face and on the narrow one, the hero's
- * LED ring or a small one's ticks, and a band triangle beside its legend (the OTT's UP and DOWN). It reads
- * in percent. One def per knob for both layouts: a reflow moves the knob, never mounts another (the focus
- * stays on it). */
+/** Formatted read-out for a non-percent knob (e.g. Hz/kHz with a nearest note). */
+export interface KnobFormat {
+  /** The primary figure printed on the value line (e.g. `"440"`, `"1.50"`). */
+  value: string;
+  /** The unit printed beside it in `.uface__u` (e.g. `"Hz"`, `"kHz"`, `"%"`). */
+  unit?: string;
+  /** Optional secondary annotation beside the unit (e.g. `"· A4"`). */
+  note?: string;
+  /** Accessible `aria-valuetext` (e.g. `"440 Hz, A4"`). */
+  aria: string;
+}
+/** A knob on a face: the param it sends, its legend and accessible name, its default and its range (the
+ * engine's ceiling: FEEDBACK's 0.95; or a log-scaled range such as RING MOD's FREQ 20–1500 Hz), its centre
+ * and size on the full face and on the narrow one, the hero's LED ring or a small one's ticks, and a band
+ * triangle beside its legend (the OTT's UP and DOWN). Without `format`, it reads in percent. One def per
+ * knob for both layouts: a reflow moves the knob, never mounts another (the focus stays on it). */
 export interface KnobDef {
   param: UnitParamId;
   label: string;
   /** Its accessible name after the unit's name ("depth": "OTT depth"). */
   name: string;
   def: number;
+  min?: number;
   max?: number;
+  /** Map the knob's 0..1 travel logarithmically over `[min, max]` (`min > 0`). */
+  log?: boolean;
+  /** Quantize a sent value (default: 0.01 for percent knobs). */
+  quant?: (v: number) => number;
+  /** Format the read-out (default: percent). */
+  format?: (v: number) => KnobFormat;
   wide: KnobGeo;
   narrow: KnobGeo;
   hero?: boolean;
@@ -330,17 +348,29 @@ const DRAG_PX = 220;
  * drag's end (a release, a lost capture, the knob disabled under it) hands it back to the feed. */
 export function FaceKnob(props: { def: KnobDef; narrow: () => boolean; unit: () => UnitState; unitName: string }) {
   const k = props.def;
+  const min = k.min ?? 0;
   const max = k.max ?? 1;
+  const log = k.log === true && min > 0 && max > min;
   const geo = () => (props.narrow() ? k.narrow : k.wide);
   const [held, setHeld] = createSignal<number | null>(null);
   const value = () => held() ?? paramOf(props.unit(), k.param, k.def);
   const pct = () => Math.round(value() * 100);
+  const fmt = (): KnobFormat => (k.format ? k.format(value()) : { value: String(pct()), unit: '%', aria: `${pct()} %` });
+  const toTravel = (v: number): number => {
+    const c = Math.min(max, Math.max(min, v));
+    return log ? Math.log(c / min) / Math.log(max / min) : (c - min) / (max - min);
+  };
+  const fromTravel = (t: number): number => {
+    const c = Math.min(1, Math.max(0, t));
+    return log ? min * Math.pow(max / min, c) : min + c * (max - min);
+  };
   /** The knob's travel, 0 to 1, over the param's range. */
-  const travel = () => Math.min(1, Math.max(0, value() / max));
+  const travel = () => toTravel(value());
   // only a seated unit takes its params (the batch drops one for any other: a waiting, parked or leaving unit)
   const enabled = () => props.unit().state === 'seated';
   const send = (v: number) => {
-    const x = Math.round(Math.min(max, Math.max(0, v)) * 100) / 100;
+    const clamped = Math.min(max, Math.max(min, v));
+    const x = k.quant ? Math.min(max, Math.max(min, k.quant(clamped))) : Math.round(clamped * 100) / 100;
     setUnitParam(props.unit().id, k.param, x);
     return x;
   };
@@ -364,13 +394,14 @@ export function FaceKnob(props: { def: KnobDef; narrow: () => boolean; unit: () 
     const el = e.currentTarget as HTMLElement;
     el.focus({ preventScroll: true });
     el.setPointerCapture(e.pointerId);
-    drag = { id: e.pointerId, y: e.clientY, from: value(), el };
+    // a log knob drags along its travel; a linear one along its value, exactly as before the log knobs came
+    drag = { id: e.pointerId, y: e.clientY, from: log ? travel() : value(), el };
     setHeld(value());
   };
   const onMove = (e: PointerEvent) => {
     if (!drag || drag.id !== e.pointerId || !enabled()) return;
-    const v = drag.from + ((drag.y - e.clientY) / DRAG_PX) * max * (e.shiftKey ? 0.25 : 1);
-    setHeld(send(v));
+    const d = ((drag.y - e.clientY) / DRAG_PX) * (e.shiftKey ? 0.25 : 1);
+    setHeld(send(log ? fromTravel(drag.from + d) : drag.from + d * (max - min)));
   };
   const onUp = (e: PointerEvent) => {
     if (drag?.id === e.pointerId) letGo(true);
@@ -378,8 +409,8 @@ export function FaceKnob(props: { def: KnobDef; narrow: () => boolean; unit: () 
   const onKey = (e: KeyboardEvent) => {
     if (!enabled()) return;
     const step = { ArrowUp: 0.01, ArrowRight: 0.01, ArrowDown: -0.01, ArrowLeft: -0.01, PageUp: 0.1, PageDown: -0.1 }[e.key];
-    if (step !== undefined) send(value() + step);
-    else if (e.key === 'Home') send(0);
+    if (step !== undefined) send(log ? fromTravel(travel() + step) : value() + step);
+    else if (e.key === 'Home') send(min);
     else if (e.key === 'End') send(max);
     else return;
     e.preventDefault();
@@ -388,7 +419,8 @@ export function FaceKnob(props: { def: KnobDef; narrow: () => boolean; unit: () 
   const wheel = (e: WheelEvent) => {
     if (!enabled()) return;
     e.preventDefault();
-    send(value() + (e.deltaY < 0 ? 0.01 : -0.01));
+    const step = e.deltaY < 0 ? 0.01 : -0.01;
+    send(log ? fromTravel(travel() + step) : value() + step);
   };
   const angle = () => `${-135 + 270 * travel()}deg`;
   // the hero's ring of LED dots, lit up to its value; a small knob's eleven printed ticks
@@ -410,10 +442,10 @@ export function FaceKnob(props: { def: KnobDef; narrow: () => boolean; unit: () 
         role="slider"
         tabindex={0}
         aria-label={`${props.unitName} ${k.name}`}
-        aria-valuemin={0}
-        aria-valuemax={Math.round(max * 100)}
-        aria-valuenow={pct()}
-        aria-valuetext={`${pct()} %`}
+        aria-valuemin={k.format ? min : 0}
+        aria-valuemax={k.format ? max : Math.round(max * 100)}
+        aria-valuenow={k.format ? (k.quant ? k.quant(value()) : Math.round(value())) : pct()}
+        aria-valuetext={fmt().aria}
         aria-disabled={!enabled()}
         data-param={k.param}
         style={knobStyle(angle(), geo().size, k.hero)}
@@ -445,8 +477,13 @@ export function FaceKnob(props: { def: KnobDef; narrow: () => boolean; unit: () 
         {k.label}
       </span>
       <span class="uface__val" classList={{ 'is-adjusting': held() !== null }} aria-hidden="true">
-        {pct()}
-        <span class="uface__u">%</span>
+        {fmt().value}
+        <Show when={fmt().unit}>
+          <span class="uface__u">{fmt().unit}</span>
+        </Show>
+        <Show when={fmt().note}>
+          <span class="uface__note">{fmt().note}</span>
+        </Show>
       </span>
     </div>
   );

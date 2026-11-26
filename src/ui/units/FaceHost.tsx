@@ -7,6 +7,10 @@ import { EchoFace } from './EchoFace';
 import { suspendEchoDraw } from './echo-loop';
 import { OttFace } from './OttFace';
 import { suspendOttDraw } from './ott-loop';
+import { RingFace } from './RingFace';
+import { suspendRingDraw } from './ring-loop';
+import { ReverbFace } from './ReverbFace';
+import { suspendReverbDraw } from './reverb-loop';
 import { closeFace, openFaces, plateOf, type OpenFace } from './face-store';
 
 /**
@@ -70,10 +74,14 @@ export function FaceHost(props: { inert?: boolean; returnFocus?: (el: HTMLElemen
     const hidden = stageOpen();
     suspendEchoDraw(hidden);
     suspendOttDraw(hidden);
+    suspendRingDraw(hidden);
+    suspendReverbDraw(hidden);
   });
   onCleanup(() => {
     suspendEchoDraw(false);
     suspendOttDraw(false);
+    suspendRingDraw(false);
+    suspendReverbDraw(false);
     slots.clear();
   });
   return (
@@ -108,6 +116,12 @@ function Face(props: {
       </Match>
       <Match when={!!at() && f.kind === 'echo'}>
         <EchoFace unit={unit} slotLetter={slotLetter} close={close} />
+      </Match>
+      <Match when={!!at() && f.kind === 'ring'}>
+        <RingFace unit={unit} slotLetter={slotLetter} close={close} />
+      </Match>
+      <Match when={!!at() && f.kind === 'reverb'}>
+        <ReverbFace unit={unit} slotLetter={slotLetter} close={close} />
       </Match>
     </Switch>
   );

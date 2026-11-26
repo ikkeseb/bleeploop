@@ -555,17 +555,21 @@ await probe(async ({ open }) => {
         assert.equal(await active(), `unit__name slot-pop__trigger@${ott}`);
       });
       await check('the row’s popovers hang from their plate: the name’s Parameters and the + menu', async () => {
-        const reverb = await unitOf('reverb');
-        await plate(reverb).locator('.unit__name').click();
-        const panel = page.getByRole('dialog', { name: 'REVERB parameters' });
+        // every built-in effect opens its own face now: a plugin's plate keeps the Parameters popover
+        await add('a', 'Fake Amp');
+        const amp = (await ids(0)).at(-1);
+        await plate(amp).locator('.unit__name').click();
+        const panel = page.getByRole('dialog', { name: 'Fake Amp parameters' });
         await panel.waitFor();
-        const pb = await plate(reverb).boundingBox();
+        const pb = await plate(amp).boundingBox();
         const fb = await panel.boundingBox();
-        assert.ok(fb.y >= pb.y + pb.height && fb.y <= pb.y + pb.height + 14, `under the REVERB plate: panel top ${fb.y}, plate bottom ${pb.y + pb.height}`);
+        assert.ok(fb.y >= pb.y + pb.height && fb.y <= pb.y + pb.height + 14, `under the plugin's plate: panel top ${fb.y}, plate bottom ${pb.y + pb.height}`);
         assert.ok(fb.x >= pb.x - 20 && fb.x <= pb.x + pb.width, `beside it: panel left ${fb.x}, plate ${pb.x}..${pb.x + pb.width}`);
         await page.keyboard.press('Escape');
         await settle();
-        assert.equal(await active(), `unit__name slot-pop__trigger@${reverb}`, 'focus back on the name');
+        assert.equal(await active(), `unit__name slot-pop__trigger@${amp}`, 'focus back on the name');
+        await page.evaluate((id) => window.__lf.native.chain.host.remove(id), amp);
+        await page.waitForTimeout(200);
         const plus = page.locator('.slot--a .unit-add');
         await plus.click();
         const menuBox = await page.getByRole('menu', { name: 'Add to slot A' }).boundingBox();
@@ -653,7 +657,7 @@ await probe(async ({ open }) => {
         }
         await page.waitForTimeout(250);
         assert.equal(await plate(la).getAttribute('data-state'), 'seated', 'applied when the take ends');
-        assert.ok(!(await calls()).some((x) => x[0] === 'listParams'), 'no listParams went out for a unit not seated');
+        assert.ok(!(await calls()).some((x) => x[0] === 'listParams' && x[1] === la), 'no listParams went out for a unit not seated');
       });
       await check('a held removal: the plate says it goes when the take ends, said; then it goes', async () => {
         const la = (await chains())[0].units.find((u) => u.name === 'Fake Lookahead').id;

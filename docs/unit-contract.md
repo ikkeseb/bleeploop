@@ -540,12 +540,15 @@ The UI is built against `src/platform/host.web.ts` first. The fake models the ch
 - **Bypass and params:** `SetUnitBypass`, `ToggleUnit` and `Toggle.Units` switch the model and answer with
   `chains` (and `Toggled`); `SetUnitParam` lands in `params` clamped as the engine clamps. A probe
   restores a cold rig (a bypassed plugin, two ECHOs at different settings), reads it from a reset frame.
-- **The faces' feed:** while an OTT or an ECHO unit is seated and on, `unitMeters` on the fake's own 60 Hz
-  timer from a deterministic signal: the OTT's bands from the mockup's simulated part
+- **The faces' feed:** while an OTT, an ECHO, a REVERB or a RING MOD unit is seated and on, `unitMeters` on
+  the fake's own 60 Hz timer from a deterministic signal: the OTT's bands from the mockup's simulated part
   (`docs/redesign/ott.js`, through the same curve), following its four params; the ECHO's `out` per
   channel from a plucked note on every bar's downbeat and its repeats through its own three params, at the
-  tempo and meter the scripted `Transport` set (120 in 4/4 from a reset). A probe turns the timer off and
-  scripts frames through `emit`.
+  tempo and meter the scripted `Transport` set (120 in 4/4 from a reset); the REVERB's `out` per channel
+  from the same downbeat note, a short dry pluck, and a tail of a 2.5 s fall (60 dB) that its LEVEL scales,
+  the two channels' tails a little apart; the RING MOD's `out` per channel from the same downbeat note
+  modulated by its carrier at `ringFreq` and `ringLevel`. A probe turns the timer off and scripts frames
+  through `emit`.
 - **Probe seams:** every `ChainHost` call recorded in order; a hold in `loading` or `waiting`; a scripted
   failure or park; a scripted `held`; an injectable id mint.
 - **Stereo:** four canned inputs, §7's pick shape per slot, a peak per channel in `meter`, two blocks per
