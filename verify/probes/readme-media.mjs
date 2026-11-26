@@ -1,6 +1,8 @@
 /**
- * README media, not a proof: the hero clip `docs/media/bleeploop-demo.webp` and the still
- * `docs/media/bleeploop.png`, rendered from the real UI at 1280x820 with the keyboard hidden. Engine mode
+ * README media, not a proof: a hero clip and a still (`CLIP` and `STILL` below), rendered from the real UI
+ * at 1280x820 with the keyboard hidden. The README has not shown them since v0.9.0's redesign: its
+ * `docs/media/bleeploop-main.webp` and `docs/media/bleeploop-faces.webp` come from a 1920x1080 rig built
+ * on this probe, run outside this repo; a run here writes the old pair again. Engine mode
  * on the web engine fake (`src/platform/host.web.ts`), set up as `contact-sheet.mjs` sets up its
  * guitar-first scenes: the plugin host served as available, two stubbed amp-sims scanned and the first
  * picked in slot A (GO LIVE), and every lane, the clock, the beats, the waveforms and the input meter

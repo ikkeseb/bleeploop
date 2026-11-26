@@ -1,3 +1,5 @@
+[![Ring of Takes, a rendered BleepLoop still: three loop takes drawn as concentric rings of waveforms round a bar counter](docs/media/bleeploop-ring-of-takes.webp)](https://sebastian.nuez.no/lab/bleeploop/)
+
 # BleepLoop
 
 A looper for Windows that you play live: a guitar, a bass, a synth or a keyboard. Load your own amp-sim
@@ -13,12 +15,12 @@ stands](#where-it-stands).
   VIDEO SLOT (60 s, with sound). Not recorded yet. When it exists: drag the .mp4 into any GitHub
   issue or comment box (no need to post it). GitHub uploads it and writes a
   https://github.com/user-attachments/assets/... link, which a README renders as a player with sound.
-  Put that link on its own line here, delete this comment and keep the silent clip below as the fallback.
+  Put that link on its own line here, delete this comment and keep the still below.
 -->
 
-![The app walked through a jam: three two-bar takes stacked track by track, an echo on the guitar input, a delay on track 1, an amp-sim swap in slot A, then the full-window stage view](docs/media/bleeploop-demo.webp)
+![BleepLoop's main screen: three loops playing on tracks 1-3, an amp-sim live in slot A ahead of the input effects ECHO, REVERB, RING MOD and OTT, and track 1's FX drawer open with DELAY on](docs/media/bleeploop-main.webp)
 
-*The clip above is silent. It is the app's interface clicked through a jam, with drawn waveforms.*
+*BleepLoop as v0.9.0 ships it, captured from its interface; the waveforms are drawn for the capture.*
 
 Download `BleepLoop_<version>_x64-setup.exe` from the latest release and run it. The installer is not
 code-signed, so Windows SmartScreen warns on first run: choose "More info", then "Run anyway" (the
@@ -49,8 +51,6 @@ itself.
    it.
 5. Help (the ? in the command bar) lists the rest.
 
-![BleepLoop with two tracks playing and a third recording](docs/media/bleeploop.png)
-
 ## What is in it
 
 - Five loop tracks with overdub and one-level undo, per-track reverse, mute, volume and pan, a count-in
@@ -58,7 +58,7 @@ itself.
 - Two plugin slots (CLAP, VST3, 64-bit VST2) with their own editor windows. Each slot comes back at
   launch with the plugin and the settings you left it at.
 - Effects per track (filter, pitch shift, stutter, delay, a shared reverb) and on the live input (echo,
-  reverb, ring modulator).
+  reverb, ring modulator, a three-band OTT compressor).
 - Six built-in synths, one of them a drum kit, for the other layers from a MIDI keyboard.
 - Record, play, undo, mute, tap tempo, the click, FADE and the looper's other actions can be learned
   onto a MIDI footswitch, key or CC. A full-window stage view keeps
@@ -66,6 +66,14 @@ itself.
 - Your loops are saved once they have held still for two seconds and come back when you reopen; a
   crash before that save loses the last change. A jam exports as one zip: a WAV stem per track, a mix
   and each plugin's settings.
+
+### In the works
+
+![OTT and ECHO with faces of their own: in slot A's chain after the amp-sim, OTT's face shows its three bands moving as DEPTH turns, then ECHO's face opens over it, steps TIME to 1/4 and lifts FEEDBACK](docs/media/bleeploop-faces.webp)
+
+*Built, not released: captured in the app's browser test rig. A coming release lets a slot hold a
+chain, with OTT and ECHO as plates after the plugin that open these faces. v0.9.0 has both on the live
+input, without the faces.*
 
 <details>
 <summary><b>Everything it does</b></summary>
@@ -93,8 +101,8 @@ itself.
   asks first.
 - Per-track FX: filter, pitch shift, tempo-synced stutter, feedback delay and a shared reverb send.
   Each one bypasses without a click.
-- IN FX: a tempo-synced echo, a reverb and a ring modulator on the live input, heard and recorded,
-  while the dry signal and a take's timing stay untouched.
+- IN FX: a tempo-synced echo, a reverb, a ring modulator and a three-band OTT compressor on the live
+  input, heard and recorded, while the dry signal and a take's timing stay untouched.
 - Stage view (B, or a learned pedal): a full-window visualizer of the loops in four looks,
   switched with V. Scope, the first, draws what the engine plays: the whole output with the guitar
   over it and each track after its FX. Orbit wraps each track's loop into a ring around the live
