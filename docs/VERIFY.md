@@ -85,6 +85,42 @@ router (the fake records it in `__lf.native.inputSent`; native MIDI's events are
   session cannot hijack mid-probe.
 - `file://` is BLOCKED in Playwright (mockups need `python3 -m http.server 8765`).
 
+## Linux desktop audio
+
+Run this on Linux with the normal desktop build dependencies, JACK development files, a running
+JACK graph, Xvfb (including `xvfb-run` and `xauth`), and PulseAudio-compatible `pactl` and
+`parec`. The capture needs a Pulse sink monitor of the **same output** selected in JACK. Find
+the JACK groups with `pw-jack jack_lsp` and the monitor with `pactl list short sources`.
+Keep that output free of other audio during the test. The group is the part of a port name before
+the colon. Run these commands from the repository root:
+
+```sh
+pnpm install --frozen-lockfile
+(cd src-tauri && TAURI_CONFIG='{"build":{"devUrl":"http://127.0.0.1:14937"}}' cargo build --locked -p app)
+pw-jack node verify/linux-app/run.mjs src-tauri/target/debug/app \
+  'EVO4 0' 'EVO 4 Speakers / Headphones' \
+  'alsa_output.usb-Audient_EVO4-00.HiFi__Headphones__sink.monitor'
+```
+
+The runner starts its own development server and two software-rendered app windows on private X
+displays. The first selects the endpoints in Audio Settings. It pins the observed buffer size when the menu
+offers it, and otherwise verifies the server-default preference.
+The second reopens the same private profile and verifies the controls and native device status.
+The test records two notes from the built-in organ using the lane and keyboard controls. The
+stereo sink monitor must contain the live phrase and two matching replays at the engine's bar
+length followed by silence. The runner prints its temporary directory with the unamplified WAV,
+app logs and measurements. An increase in JACK xruns or skipped device frames fails the timing
+check even when both replays match. On the EVO 4, a 48 kHz / 512-frame run with the raw capture
+group and the speaker sink shown above repeated a 96,000-frame bar twice. Both channels differed
+from the live phrase by 0.32% relative RMS, with zero additional xruns or skipped frames. The
+named guitar route showed gaps in other normal-priority runs. This short check establishes
+neither sustained stability nor guitar latency, which needs a physical loopback.
+
+To test buffer negotiation without changing the desktop graph, run
+`python3 verify/linux-app/private-graph.py`. It starts a separate PipeWire server, switches quantum and endpoints, checks that a
+refused route leaves the old one running, then closes and reopens the selected route.
+The standalone probe below isolates the device and engine if the desktop flow fails.
+
 ## Linux JACK device probe
 
 The standalone crate in `verify/linux-audio/` runs `lf-engine` in one duplex JACK callback.

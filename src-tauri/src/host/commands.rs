@@ -438,8 +438,11 @@ pub async fn plugin_close_editor(slot: u8, frontend_epoch: u32, app: tauri::AppH
 #[tauri::command]
 pub async fn plugin_list_input_devices() -> Result<Vec<AudioInputDevice>, String> {
     #[cfg(windows)]
+    let devs = crate::audio_input::list_input_devices()?;
+    #[cfg(target_os = "linux")]
+    let devs = tauri::async_runtime::spawn_blocking(crate::linux_audio::list_inputs).await.map_err(|e| e.to_string())??;
+    #[cfg(any(windows, target_os = "linux"))]
     {
-        let devs = crate::audio_input::list_input_devices()?;
         Ok(devs
             .into_iter()
             .map(|d| AudioInputDevice {
@@ -449,7 +452,7 @@ pub async fn plugin_list_input_devices() -> Result<Vec<AudioInputDevice>, String
             })
             .collect())
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Ok(Vec::new())
     }
@@ -459,8 +462,11 @@ pub async fn plugin_list_input_devices() -> Result<Vec<AudioInputDevice>, String
 #[tauri::command]
 pub async fn plugin_list_output_devices() -> Result<Vec<AudioOutputDevice>, String> {
     #[cfg(windows)]
+    let devs = crate::audio_output::list_output_devices()?;
+    #[cfg(target_os = "linux")]
+    let devs = tauri::async_runtime::spawn_blocking(crate::linux_audio::list_outputs).await.map_err(|e| e.to_string())??;
+    #[cfg(any(windows, target_os = "linux"))]
     {
-        let devs = crate::audio_output::list_output_devices()?;
         Ok(devs
             .into_iter()
             .map(|d| AudioOutputDevice {
@@ -470,7 +476,7 @@ pub async fn plugin_list_output_devices() -> Result<Vec<AudioOutputDevice>, Stri
             })
             .collect())
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Ok(Vec::new())
     }

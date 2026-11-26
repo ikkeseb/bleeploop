@@ -1,5 +1,6 @@
 import { createSignal } from 'solid-js';
 import {
+  jackHost,
   platform,
   samePick,
   type AsioDeviceInfo,
@@ -13,6 +14,7 @@ import {
   defaultSlotInputChannels,
   readAudioDeviceSettings,
   writeAudioDeviceSettings,
+  type AudioDeviceSettings,
   type BufferFrames,
   type SampleRate,
 } from './audio-settings';
@@ -28,14 +30,19 @@ import { settingsAction } from '../../settings-opener';
  * in the browser build.
  */
 
+/** JACK enumerates devices even though it has no plugin host. */
+export const hasDeviceSettings = () => jackHost || platform.pluginHost.available;
+
 // Native capture devices the host enumerates.
 const [inputDevices, setInputDevices] = createSignal<AudioInputDevice[]>([]);
 // Native OUTPUT devices the host enumerates (the output and Share pickers).
 const [outputDevices, setOutputDevices] = createSignal<AudioOutputDevice[]>([]);
+let inputsKnown = false;
+let outputsKnown = false;
 
 // The buffer size: the chosen block in frames, init from the persisted setting. ONE process-wide value
 // (not per-slot); the engine's device open reads it.
-const [bufferFrames, setBufferFramesSig] = createSignal<BufferFrames>(
+const [bufferFrames, setBufferFramesSig] = createSignal<BufferFrames | null>(
   readAudioDeviceSettings().bufferFrames,
 );
 
@@ -97,11 +104,13 @@ function configure(op: () => Promise<void>): Promise<void> {
  * interface shows up without a full app restart.
  */
 export async function refreshInputDevices(): Promise<boolean> {
-  if (!platform.pluginHost.available) return false;
+  if (!hasDeviceSettings()) return false;
   try {
     setInputDevices(await platform.pluginHost.listInputDevices());
+    inputsKnown = true;
     return true;
   } catch (e) {
+    inputsKnown = false;
     console.error('[instrument] list input devices failed', e);
     notifyError('Could not list the audio inputs. Reopen Audio Settings to try again.', e);
     return false;
@@ -113,11 +122,13 @@ export async function refreshInputDevices(): Promise<boolean> {
  * enumeration.
  */
 export async function refreshOutputDevices(): Promise<boolean> {
-  if (!platform.pluginHost.available) return false;
+  if (!hasDeviceSettings()) return false;
   try {
     setOutputDevices(await platform.pluginHost.listOutputDevices());
+    outputsKnown = true;
     return true;
   } catch (e) {
+    outputsKnown = false;
     console.error('[instrument] list output devices failed', e);
     notifyError('Could not list the audio outputs. Reopen Audio Settings to try again.', e);
     return false;
@@ -134,9 +145,10 @@ export async function refreshOutputDevices(): Promise<boolean> {
  * Settings popover opens (to catch a mid-session unplug). No-op in the web build.
  */
 export async function refreshAndPruneDevices(): Promise<void> {
-  if (!platform.pluginHost.available) return;
+  if (!hasDeviceSettings()) return;
   const inputRefreshSucceeded = await refreshInputDevices();
   const outputRefreshSucceeded = await refreshOutputDevices();
+  if (jackHost) return; // The next open saves a vanished endpoint's fallback only if it runs.
   const s = readAudioDeviceSettings();
   if (
     inputRefreshSucceeded &&
@@ -156,8 +168,34 @@ export async function refreshAndPruneDevices(): Promise<void> {
   }
 }
 
+/** A settings gesture changes only these fields. JACK opens against the last accepted picks before saving it. */
+export type DeviceEdit = Partial<Pick<AudioDeviceSettings, 'bufferFrames' | 'inputDeviceId' | 'outputDeviceId' | 'inputChannel' | 'slotInputChannels'>>;
+
+/** Resolve vanished JACK endpoints inside the open queue, against the latest accepted picks. */
+export function jackEndpointFallback(): DeviceEdit | undefined {
+  const s = readAudioDeviceSettings();
+  const missingInput = inputsKnown && s.inputDeviceId && !inputDevices().some((d) => d.id === s.inputDeviceId);
+  const missingOutput = outputsKnown && s.outputDeviceId && !outputDevices().some((d) => d.id === s.outputDeviceId);
+  if (!missingInput && !missingOutput) return undefined;
+  return {
+    ...(missingInput ? { inputDeviceId: '', inputChannel: '', slotInputChannels: defaultSlotInputChannels() } : {}),
+    ...(missingOutput ? { outputDeviceId: '' } : {}),
+  };
+}
+
+const [lastDeviceEdit, setLastDeviceEdit] = createSignal<DeviceEdit>();
+export { lastDeviceEdit };
+
+/** Publish one successful change to storage and every mounted device control. */
+export function commitDeviceEdit(edit: DeviceEdit): void {
+  writeAudioDeviceSettings(edit);
+  if (edit.slotInputChannels !== undefined) setSlotInputChannelsSig(edit.slotInputChannels);
+  if (edit.bufferFrames !== undefined) setBufferFramesSig(edit.bufferFrames);
+  setLastDeviceEdit(edit);
+}
+
 /** Save and show the buffer size; the engine's next device open takes it (Audio Settings reopens). */
-export async function setBufferSize(frames: BufferFrames): Promise<void> {
+export async function setBufferSize(frames: BufferFrames | null): Promise<void> {
   setBufferFramesSig(frames);
   writeAudioDeviceSettings({ bufferFrames: frames });
 }

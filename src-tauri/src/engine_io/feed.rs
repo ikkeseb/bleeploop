@@ -628,7 +628,7 @@ impl Feed {
     }
 
     fn anchor(&self) -> Option<ClockAnchor> {
-        let (frame, at_ms, rate) = self.host.core.clock.anchor()?;
+        let (frame, at_ms, rate) = self.host.feed_anchor()?;
         let grid = self.overview.as_ref().map_or(0, |o| o.grid());
         Some(ClockAnchor { frame, at_ms, rate, grid })
     }
@@ -904,7 +904,7 @@ fn fold_unit_meter(fold: &mut Vec<UnitMeter>, meter: UnitMeter) {
     };
 }
 
-#[cfg(test)]
+#[cfg(all(windows, test))]
 mod tests {
     use super::*;
     use crate::engine_io::test_rig::{TestDevice, PATIENCE};

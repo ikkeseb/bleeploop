@@ -3,10 +3,10 @@ name: linux-audio-probe
 on:
   push:
     branches: [main, dev]
-    paths: ['verify/linux-audio/**', 'src-tauri/crates/lf-engine/**', 'src-tauri/rust-toolchain.toml', '.github/workflows/linux-audio-probe.yml']
+    paths: ['src-tauri/**', '!src-tauri/**/*.md', 'verify/fixtures/**', 'verify/linux-audio/**', 'verify/linux-app/private-graph.py', '.github/workflows/linux-audio-probe.yml']
   pull_request:
     branches: [main]
-    paths: ['verify/linux-audio/**', 'src-tauri/crates/lf-engine/**', 'src-tauri/rust-toolchain.toml', '.github/workflows/linux-audio-probe.yml']
+    paths: ['src-tauri/**', '!src-tauri/**/*.md', 'verify/fixtures/**', 'verify/linux-audio/**', 'verify/linux-app/private-graph.py', '.github/workflows/linux-audio-probe.yml']
 
 permissions:
   contents: read
@@ -14,12 +14,23 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libjack-jackd2-dev
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libjack-jackd2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev pipewire-bin pipewire-jack
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+
+      - run: cargo test --locked -p app --lib
+        working-directory: src-tauri
+
+      # A private server with two virtual endpoints exercises buffer negotiation and route handoff.
+      - run: python3 verify/linux-app/private-graph.py
+
       # Use the workspace toolchain pin and link the probe against the runner's libjack.
       - run: cargo build --locked --manifest-path ../verify/linux-audio/Cargo.toml
         working-directory: src-tauri

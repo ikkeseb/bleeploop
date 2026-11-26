@@ -48,9 +48,12 @@ tauri-plugin-log = "2"
 # The app updater (`src/update.rs`). 2.13 wants tauri 2.12; `zip` is only for the macOS/Linux bundles.
 tauri-plugin-updater = { version = "~2.12", default-features = false, features = ["rustls-tls", "system-proxy"] }
 
-# Windows-only deps. The app is a Windows desktop instrument (Tauri/WebView2), so the native engine's
-# device side and plugin host (clack/cpal/rubato/rtrb/walkdir) live here too — they're cross-platform
-# crates but we only ever compile + use them on Windows, alongside the WebView2 COM bindings.
+# Both native audio hosts drive the same device-independent engine and its wait-free queues.
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+lf-engine = { path = "crates/lf-engine" }
+rtrb = "0.3.4"
+
+# The Windows device side and plugin host use cpal, Win32 and the WebView2 COM bindings.
 [target.'cfg(windows)'.dependencies]
 # deny the WebView2 Web MIDI permission (`lib.rs`) — already transitive via tauri; pinned to the resolved
 # versions so the ICoreWebView2 types unify with Tauri's.
@@ -114,11 +117,8 @@ cpal             = { version = "=0.18.1", default-features = false }
 # The asio-sys cpal 0.18.1 builds on (the same crate, so one driver registry and one loaded driver);
 # pinned with cpal. Only under the `asio` feature.
 asio-sys         = { version = "=0.3.0", optional = true }
-rtrb             = "0.3.4"                  # wait-free SPSC rings (engine commands, plugin events, the pipes)
 rubato           = "3.0.0"                  # the engine pipes' fractional resampler (engine_io::pipes)
 walkdir          = "2"                      # the plugin scan's folder walk: CLAP, VST3 and VST2 (no clack-finder)
-# The native engine (briefing: crates/lf-engine/src/lib.rs): pure, driven by `engine_io`.
-lf-engine        = { path = "crates/lf-engine" }
 # Chain mode's rig record rules (briefing: crates/lf-rig/src/lib.rs): pure, driven by `engine_io`.
 lf-rig           = { path = "crates/lf-rig" }
 # Native MIDI input for the engine (engine_io::midi; WinMM on Windows). 0.11 accepts windows

@@ -36,7 +36,9 @@
 //! crosses only inside a session export or import (`plugin_tone_take` / `plugin_tone_import`).
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::Ordering::{Acquire, Relaxed};
+use std::sync::atomic::Ordering::Acquire;
+#[cfg(windows)]
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 
 use lf_engine::grid::{frames_per_bar, Frame, Meter};
@@ -315,7 +317,7 @@ impl EngineHost {
                     match sent {
                         Err(back) => job = Some(*back),
                         Ok(()) => {
-                            #[cfg(test)]
+                            #[cfg(all(windows, test))]
                             self.core.session_sent.fetch_add(1, Relaxed);
                         }
                     }
@@ -347,6 +349,7 @@ impl EngineHost {
 
     /// With no device running nothing services the port: do it here, under the engine lock, as a slot
     /// host does (`SlotHost::service_if_idle`).
+    #[cfg(windows)]
     fn service_session_if_idle(&self) {
         if self.core.running.load(Acquire) {
             return;

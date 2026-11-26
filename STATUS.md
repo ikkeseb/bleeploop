@@ -187,6 +187,7 @@ settles.
 Guitar in, ASIO, a pedal where named: feel, latency, devices, drivers, plugins, MIDI hardware, and
 anything else that needs the interface or a real plugin.
 
+- Linux JACK on the EVO 4: does the dry guitar on In 1 feel immediate through LIVE, and do its first take and overdub sit on the click? The desktop audio probe and the normal-priority synth measurement are in `docs/VERIFY.md`.
 - The input OTT (the fourth input-effect plate) on the amp-sim, heard while you play and recorded into the loop:
   does the guitar feel as immediate with it on (no sample is added; its crossovers delay the lows about
   4.6 ms at 100 Hz), and does the loop sound as it did live? Is DEPTH 50 %

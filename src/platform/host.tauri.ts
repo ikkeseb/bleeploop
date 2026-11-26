@@ -73,8 +73,11 @@ function requireEpoch(): number {
   return frontendEpoch;
 }
 
+/** Present before the app loads in the Linux JACK shell. A browser on Linux still uses its own platform. */
+export const jackHost = '__LF_JACK__' in globalThis;
+
 const tauriPluginHost: PluginHost = {
-  available: true,
+  available: !jackHost,
   async init() {
     frontendEpoch = await invoke<number>('host_init');
   },
@@ -339,6 +342,7 @@ const tauriMidi: MidiHost = {
     return invoke<boolean>('midi_assign', { epoch, revision, index, portId });
   },
   async importLegacy(epoch, json) {
+    if (jackHost) return null; // Hardware MIDI bindings are Windows-only.
     const report = await invoke<unknown>('midi_import_legacy', { epoch, json });
     return report === null ? null : decodeImportReport(report);
   },
@@ -386,7 +390,7 @@ const tauriLogFolder: LogFolder = {
 /** The updater over Tauri IPC: `app_update_check` / `app_update_download` / `app_update_install` in `update.rs`. A `tauri dev`
  * build never checks: its version is the next release's, and the probes launch it many times. */
 const tauriUpdates: AppUpdates = {
-  available: !import.meta.env.DEV,
+  available: !jackHost && !import.meta.env.DEV,
   check() {
     return invoke<AppUpdate | null>('app_update_check');
   },
@@ -404,7 +408,7 @@ const tauriUpdates: AppUpdates = {
 
 /** DEV opt-in for the native chain host (`localStorage['lf.chainNative'] === '1'`), read once per page. */
 function readChainNative(): boolean {
-  if (!import.meta.env.DEV) return false;
+  if (jackHost || !import.meta.env.DEV) return false;
   try {
     return typeof localStorage !== 'undefined' && localStorage.getItem('lf.chainNative') === '1';
   } catch {

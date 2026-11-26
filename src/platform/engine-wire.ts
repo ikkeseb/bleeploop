@@ -98,7 +98,7 @@ export type InputSendId = 'echo' | 'reverb' | 'ring' | 'ott';
 export type InputSendParamId =
   | 'echoTime' | 'echoFeedback' | 'echoLevel' | 'reverbLevel' | 'ringFreq' | 'ringLevel'
   | 'ottDepth' | 'ottTime' | 'ottUpward' | 'ottDownward';
-export type AudioBackend = 'Wasapi' | 'Asio';
+export type AudioBackend = 'Wasapi' | 'Asio' | 'Jack';
 
 // ── The chain per slot (`docs/unit-contract.md` §2): the wire's unit shapes ─────────────────────────
 // The native host takes these when the DEV flag `lf.chainNative` is on (`host.tauri.ts`). The browser
@@ -260,7 +260,7 @@ const INPUT_SEND_PARAMS: readonly InputSendParamId[] = [
   'echoTime', 'echoFeedback', 'echoLevel', 'reverbLevel', 'ringFreq', 'ringLevel',
   'ottDepth', 'ottTime', 'ottUpward', 'ottDownward',
 ];
-const BACKENDS: readonly AudioBackend[] = ['Wasapi', 'Asio'];
+const BACKENDS: readonly AudioBackend[] = ['Wasapi', 'Asio', 'Jack'];
 const UNIT_KINDS: readonly UnitKindId[] = ['plugin', 'ott', 'echo', 'reverb', 'ring', 'synth'];
 const UNIT_EFFECT_KINDS: readonly UnitEffectKindId[] = ['ott', 'echo', 'reverb', 'ring'];
 const UNIT_PARAMS: readonly UnitParamId[] = [
@@ -409,6 +409,9 @@ export interface DeviceStatus {
   /** False when WASAPI opened output only (no capture device, or its stream failed): the engine's
    * input is silence. Always true on ASIO. */
   inputOpen: boolean;
+  /** JACK xrun callbacks and missing device-clock frames since this device opened. */
+  xruns?: number;
+  missingFrames?: number;
   /** What each plugin slot reads (0-based): its pick, or auto (input 2 on a device with two or more,
    * mono) where it has none or the device lacks it, either side of a pair. The native engine always
    * sends it; a scripted probe frame may leave it out. */
@@ -730,6 +733,8 @@ export function decodeDeviceStatus(raw: unknown): DeviceStatus {
     alignFrames: int(o.alignFrames, 'DeviceStatus.alignFrames'),
     inputFrames: int(o.inputFrames, 'DeviceStatus.inputFrames'),
     inputOpen: bool(o.inputOpen, 'DeviceStatus.inputOpen'),
+    ...(o.xruns === undefined ? {} : { xruns: int(o.xruns, 'DeviceStatus.xruns') }),
+    ...(o.missingFrames === undefined ? {} : { missingFrames: int(o.missingFrames, 'DeviceStatus.missingFrames') }),
     ...(o.inputChannels === undefined ? {} : { inputChannels: slotChannels(o.inputChannels) }),
     ...(o.inputRequests === undefined ? {} : { inputRequests: slotRequests(o.inputRequests) }),
   };

@@ -13,6 +13,8 @@ import {
   bufferFrames,
   sampleRatePick,
   inputDevices,
+  lastDeviceEdit,
+  type DeviceEdit,
   outputDevices,
   refreshAndPruneDevices,
   refreshAsioDrivers,
@@ -43,9 +45,10 @@ import {
   removePluginFolder,
 } from '../state/plugin-folders';
 import { ACTION_LABELS, isLaneAction, type ActionId, type Target } from '../../app/actions';
-import { platform, type ListedBinding, type MidiBinding } from '../../platform';
+import { jackHost, platform, type ListedBinding, type MidiBinding } from '../../platform';
 import {
   BUFFER_FRAMES_OPTIONS,
+  DEFAULT_BUFFER_FRAMES,
   asioBufferChoice,
   defaultSlotInputChannels,
   rateChoice,
@@ -86,7 +89,7 @@ import './audio-settings.css';
  */
 
 /** The panel's pages, in the rail's order. */
-const PAGES = (['device', 'midi', 'plugins', 'diagnostics'] as const).map((id) => ({ id, label: SETTINGS_PAGE_LABELS[id] }));
+const PAGES = (['device', 'midi', 'plugins', 'diagnostics'] as const).filter((id) => !jackHost || id !== 'midi').map((id) => ({ id, label: SETTINGS_PAGE_LABELS[id] }));
 
 /** A rail lamp, the lane LED's vocabulary (the FX pill's socket): unlit, lit warm-white while the page's
  * thing works, amber (the command bar lamp's warning) while it needs the player. */
@@ -96,6 +99,7 @@ type Lamp = 'off' | 'lit' | 'warn';
  * DIAGNOSTICS) is a Tab stop itself, as Help's panels are, so Tab from its rail tab lands on it instead
  * of leaving the panel; a click on it is blurred again (`src/app/transport-keys.ts`). */
 function Page(props: { id: SettingsPage; shown: SettingsPage; readOnly?: boolean; children: JSX.Element }) {
+  if (jackHost && props.id === 'midi') return null;
   return (
     <div
       class="audio-settings__page"
@@ -121,8 +125,8 @@ const notLoaded = () => [
 ];
 
 /** Processing-block duration, not an input-to-output latency estimate. */
-function bufferMs(frames: number): string {
-  return `~${((frames / sampleRate()) * 1000).toFixed(1)} ms/block`;
+function bufferMs(frames: number, rate = sampleRate()): string {
+  return `~${((frames / rate) * 1000).toFixed(1)} ms/block`;
 }
 
 /** A rate as the Sample rate select names it: "44.1 kHz", "48 kHz". */
@@ -130,8 +134,8 @@ const kHz = (hz: number): string => `${hz / 1000} kHz`;
 
 /** Reopen the engine's device on the saved picks, then `synced`: a switch the player declines puts back
  * the picks of the device that runs. */
-function reopenEngine(synced: () => void): void {
-  if (platform.engine.available) void openEngineDevice().then(synced);
+function reopenEngine(synced: () => void, edit?: DeviceEdit): void {
+  if (platform.engine.available) void openEngineDevice(edit).then(synced);
 }
 
 const ACTION_IDS = Object.keys(ACTION_LABELS) as ActionId[];
@@ -216,7 +220,7 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
   // the ASIO row's, so one state reads one way wherever it shows.
   const deviceState = (): { lamp: Lamp; word: string } => {
     const d = engineDevice();
-    if (d) return { lamp: 'lit', word: d.backend === 'Asio' ? 'ASIO' : 'WASAPI' };
+    if (d) return { lamp: 'lit', word: d.backend.toUpperCase() };
     if (engineOpenFailure()) return { lamp: 'warn', word: 'no device' };
     return { lamp: 'off', word: platform.engine.available ? 'starting' : 'no engine' };
   };
@@ -248,7 +252,7 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
   const roundTrip = () => {
     const d = engineDevice();
     if (!d) return 'no device';
-    const backend = d.backend === 'Asio' ? 'ASIO' : 'WASAPI';
+    const backend = d.backend.toUpperCase();
     if (d.alignFrames <= 0) return `not reported · ${backend}`;
     return `${((d.alignFrames / d.sampleRate) * 1000).toFixed(1)} ms · ${d.alignFrames} frames · ${backend}`;
   };
@@ -267,7 +271,15 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
     const d = engineDevice();
     if (!d) return engineOpenFailure() ? `no device open: ${engineOpenFailure()}` : 'no device open';
     const input = d.inputOpen ? d.inputName : 'no input';
-    return `${d.backend === 'Asio' ? 'ASIO' : 'WASAPI'} · ${input} → ${d.outputName} · ${d.block} frames · ${d.alignFrames} frames round trip`;
+    return `${d.backend.toUpperCase()} · ${input} → ${d.outputName} · ${d.block} frames · ${d.alignFrames} frames round trip`;
+  };
+
+  const defaultEndpoint = (side: 'input' | 'output') => {
+    if (usingAsio()) return asioDeviceInfo()?.name ?? 'Default ASIO driver';
+    const running = engineDevice();
+    if (!jackHost || !running || (side === 'input' ? selectedDevice() : selectedOutput())) return 'System default';
+    const name = side === 'output' ? running.outputName : running.inputOpen ? running.inputName : 'no input';
+    return `System default (${name})`;
   };
 
   const syncPicks = () => {
@@ -277,15 +289,29 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
     setSelectedDriver(s.asioDriver);
   };
 
+  // A switch can finish after the original panel closed and a new one mounted.
+  createEffect(on(lastDeviceEdit, syncPicks, { defer: true }));
+
   // Under ASIO: only the sizes the driver takes, showing the one it runs at (`asioBufferChoice`);
-  // otherwise every option, showing the saved one.
+  // JACK keeps the request (including server default) separate from the running graph quantum.
   const bufferChoice = createMemo(() => {
-    if (!usingAsio()) return { options: [...BUFFER_FRAMES_OPTIONS] as number[], shown: bufferFrames() as number, fixed: false };
+    const saved = bufferFrames();
+    if (jackHost) return { options: [...BUFFER_FRAMES_OPTIONS], shown: saved, fixed: false };
+    const frames = saved ?? DEFAULT_BUFFER_FRAMES;
+    if (!usingAsio()) return { options: [...BUFFER_FRAMES_OPTIONS], shown: frames, fixed: false };
     const info = asioDeviceInfo();
     const range = info?.bufferMin != null && info.bufferMax != null ? { min: info.bufferMin, max: info.bufferMax } : null;
     const running = engineDevice();
-    return asioBufferChoice(bufferFrames(), range, running?.backend === 'Asio' ? running.block : null);
+    return asioBufferChoice(frames, range, running?.backend === 'Asio' ? running.block : null);
   });
+
+  const shownBuffer = () => String(bufferChoice().shown ?? '');
+  const bufferReadout = () => {
+    const running = engineDevice();
+    if (!running) return 'no device';
+    if (jackHost) return `${running.block} frames · ${bufferMs(running.block, running.sampleRate)}`;
+    return bufferMs(bufferChoice().shown ?? running.block);
+  };
 
   // What runs, or with no device running the saved preference: under ASIO the rates the driver runs,
   // under WASAPI the endpoint's own alone (`rateChoice`). A fallback the owner made on its own (ASIO
@@ -381,37 +407,39 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
         {/* The ASIO row shows the toggle whenever the binary can do ASIO; the driver itself is contacted
             only by the startup probe (saved preference on) or by turning the toggle on / Retry. The
             status line under it says why ASIO is not in use (`AsioStartupStatus` in host.ts). */}
-        <div
-          class="audio-settings__row audio-settings__row--toggle"
-          classList={{ 'audio-settings__row--disabled': !asioOffered() }}
-        >
-          <span class="audio-settings__label">ASIO®</span>
-          <Show
-            when={asioOffered()}
-            fallback={
-              <span class="audio-settings__soon">
-                {asioStatus().status === 'disabled-by-flag' ? 'off for this launch (--disable-asio)' : 'unavailable'}
-              </span>
-            }
+        <Show when={!jackHost}>
+          <div
+            class="audio-settings__row audio-settings__row--toggle"
+            classList={{ 'audio-settings__row--disabled': !asioOffered() }}
           >
-            <label class="audio-settings__toggle">
-              <input
-                type="checkbox"
-                checked={asioEnabled()}
-                disabled={asioStatus().status === 'probing'}
-                onChange={(e) => {
-                  const checkbox = e.currentTarget;
-                  void setAsioEnabled(checkbox.checked).then(() => {
-                    checkbox.checked = asioEnabled();
-                    reopenEngine(syncPicks);
-                  });
-                }}
-                aria-label="Use ASIO low-latency audio"
-              />
-              <span class="audio-settings__toggle-text">{asioWord()}</span>
-            </label>
-          </Show>
-        </div>
+            <span class="audio-settings__label">ASIO®</span>
+            <Show
+              when={asioOffered()}
+              fallback={
+                <span class="audio-settings__soon">
+                  {asioStatus().status === 'disabled-by-flag' ? 'off for this launch (--disable-asio)' : 'unavailable'}
+                </span>
+              }
+            >
+              <label class="audio-settings__toggle">
+                <input
+                  type="checkbox"
+                  checked={asioEnabled()}
+                  disabled={asioStatus().status === 'probing'}
+                  onChange={(e) => {
+                    const checkbox = e.currentTarget;
+                    void setAsioEnabled(checkbox.checked).then(() => {
+                      checkbox.checked = asioEnabled();
+                      reopenEngine(syncPicks);
+                    });
+                  }}
+                  aria-label="Use ASIO low-latency audio"
+                />
+                <span class="audio-settings__toggle-text">{asioWord()}</span>
+              </label>
+            </Show>
+          </div>
+        </Show>
         {/* The ASIO driver: picking one switches live — the device closes, the driver
             starts, the device reopens (`switchEngineAsioDriver`). Automatic names the driver it took. */}
         <Show when={asioOffered() && asioEnabled()}>
@@ -476,32 +504,40 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
             class="audio-settings__select"
             classList={{ 'audio-settings__select--fixed': bufferChoice().options.length === 1 }}
             disabled={bufferChoice().options.length === 1}
-            value={String(bufferChoice().shown)}
+            value={shownBuffer()}
             onChange={(e) => {
-              const v = Number(e.currentTarget.value);
               const select = e.currentTarget;
+              const v = jackHost && select.value === '' ? null : Number(select.value);
               // A size outside the list is the driver's own, shown because it runs: nothing to save.
-              if (!(BUFFER_FRAMES_OPTIONS as readonly number[]).includes(v)) {
-                select.value = String(bufferChoice().shown);
+              if (v !== null && !(BUFFER_FRAMES_OPTIONS as readonly number[]).includes(v)) {
+                select.value = shownBuffer();
+                return;
+              }
+              if (jackHost) {
+                select.value = shownBuffer();
+                reopenEngine(syncPicks, { bufferFrames: v as BufferFrames | null });
                 return;
               }
               void setBufferSize(v as BufferFrames).then(() => {
-                select.value = String(bufferChoice().shown);
+                select.value = shownBuffer();
                 reopenEngine(syncPicks);
               });
             }}
             aria-label="Buffer size in frames"
           >
+            <Show when={jackHost}><option value="" selected={bufferChoice().shown === null}>Server default</option></Show>
             <For each={bufferChoice().options}>
               {(f) => <option value={String(f)} selected={f === bufferChoice().shown}>{f} frames</option>}
             </For>
           </select>
-          <span class="audio-settings__readout">{engineDevice() ? bufferMs(bufferChoice().shown) : 'no device'}</span>
+          <span class="audio-settings__readout">{bufferReadout()}</span>
         </div>
         <div class="audio-settings__hint audio-settings__hint--info" role="note">
-          {bufferChoice().fixed
-            ? "Set by the driver: change it in the driver's control panel."
-            : 'Frames per device callback: smaller is lower latency, larger is safer.'}
+          {jackHost
+            ? 'A frame count requests that buffer size for the shared JACK graph. Server default follows the graph.'
+            : bufferChoice().fixed
+              ? "Set by the driver: change it in the driver's control panel."
+              : 'Frames per device callback: smaller is lower latency, larger is safer.'}
         </div>
 
         <div class="audio-settings__row">
@@ -535,7 +571,9 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
             ? "The engine's rate. Loops recorded at one rate wait in recovery at another."
             : rateOnAsio()
               ? "Set by the driver: change it in the driver's control panel."
-              : "Set by Windows: change it in the device's Sound settings, or use ASIO to pick one here."}
+              : jackHost
+                ? "Set by the JACK server."
+                : "Set by Windows: change it in the device's Sound settings, or use ASIO to pick one here."}
         </div>
 
         {/* The result of the picks above, read as the rest of the panel reads: a label and a mono value. */}
@@ -546,7 +584,7 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
           </span>
         </div>
 
-        <div class="audio-settings__sub">Windows devices</div>
+        <div class="audio-settings__sub">{jackHost ? 'JACK devices' : 'Windows devices'}</div>
         <div class="audio-settings__row">
           <span class="audio-settings__label">input</span>
           <select
@@ -555,6 +593,11 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
             disabled={usingAsio()}
             onChange={(e) => {
               const v = e.currentTarget.value;
+              if (jackHost) {
+                e.currentTarget.value = selectedDevice();
+                reopenEngine(syncPicks, { inputDeviceId: v, inputChannel: '', slotInputChannels: defaultSlotInputChannels() });
+                return;
+              }
               setSelectedDevice(v);
               writeAudioDeviceSettings({ inputDeviceId: v, inputChannel: '' });
               // The slots' picks to the install's default too (a declined switch puts them back).
@@ -563,7 +606,10 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
             }}
             aria-label="Audio input device"
           >
-            <option value="">{usingAsio() ? asioDeviceInfo()?.name ?? 'Default ASIO driver' : 'System default'}</option>
+            <option value="">{defaultEndpoint('input')}</option>
+            <Show when={jackHost && selectedDevice() && !inputDevices().some((d) => d.id === selectedDevice())}>
+              <option value={selectedDevice()} selected>{selectedDevice()} (unavailable)</option>
+            </Show>
             <For each={inputDevices()}>
               {(d) => <option value={d.id} selected={!usingAsio() && d.id === selectedDevice()}>{d.name}</option>}
             </For>
@@ -578,49 +624,74 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
             disabled={usingAsio()}
             onChange={(e) => {
               const v = e.currentTarget.value;
+              if (jackHost) {
+                e.currentTarget.value = selectedOutput();
+                reopenEngine(syncPicks, { outputDeviceId: v });
+                return;
+              }
               setSelectedOutput(v);
               writeAudioDeviceSettings({ outputDeviceId: v });
               reopenEngine(syncPicks);
             }}
             aria-label="Output device"
           >
-            <option value="">{usingAsio() ? asioDeviceInfo()?.name ?? 'Default ASIO driver' : 'System default'}</option>
+            <option value="">{defaultEndpoint('output')}</option>
+            <Show when={jackHost && selectedOutput() && !outputDevices().some((d) => d.id === selectedOutput())}>
+              <option value={selectedOutput()} selected>{selectedOutput()} (unavailable)</option>
+            </Show>
             <For each={outputDevices()}>
               {(d) => <option value={d.id} selected={!usingAsio() && d.id === selectedOutput()}>{d.name}</option>}
             </For>
           </select>
         </div>
 
+        <Show when={jackHost && !engineDevice() && engineOpenFailure()}>
+          <div class="audio-settings__hint" role="status">
+            {engineOpenFailure()}
+            <button
+              type="button"
+              class="audio-settings__btn"
+              onClick={async () => {
+                await refreshAndPruneDevices();
+                reopenEngine(syncPicks);
+              }}
+            >
+              Retry audio
+            </button>
+          </div>
+        </Show>
         <Show when={usingAsio()}>
           <div class="audio-settings__hint audio-settings__hint--info" role="note">ASIO drives both input and output. Turn ASIO off to pick Windows devices.</div>
         </Show>
         {/* Share output: the master without the click (the engine's Share mix) mirrored to a Windows
             device for OBS, a browser or a call, while the engine runs on ASIO. A device that goes away
             turns it off with a toast. */}
-        <div class="audio-settings__row" title="Mirror the master, without the click, to another Windows device while ASIO runs">
-          <span class="audio-settings__label">share</span>
-          <select
-            class="audio-settings__select"
-            value={engineShare()}
-            onChange={(e) => {
-              const select = e.currentTarget;
-              void setEngineShare(select.value).then(() => {
-                select.value = engineShare();
-              });
-            }}
-            aria-label="Share output device"
-          >
-            <option value="">Off</option>
-            <For each={outputDevices()}>
-              {(d) => <option value={d.id} selected={d.id === engineShare()}>{d.name}</option>}
-            </For>
-          </select>
-        </div>
-        <div class="audio-settings__hint audio-settings__hint--info" role="note">
-          Mirrors the master, without the click, to that device while ASIO runs: capture that device in OBS
-          or the call. Pick one you don't listen on, such as a virtual cable: on the interface in your ears,
-          you hear everything twice. On WASAPI, capture BleepLoop's own output instead: it carries the click.
-        </div>
+        <Show when={!jackHost}>
+          <div class="audio-settings__row" title="Mirror the master, without the click, to another Windows device while ASIO runs">
+            <span class="audio-settings__label">share</span>
+            <select
+              class="audio-settings__select"
+              value={engineShare()}
+              onChange={(e) => {
+                const select = e.currentTarget;
+                void setEngineShare(select.value).then(() => {
+                  select.value = engineShare();
+                });
+              }}
+              aria-label="Share output device"
+            >
+              <option value="">Off</option>
+              <For each={outputDevices()}>
+                {(d) => <option value={d.id} selected={d.id === engineShare()}>{d.name}</option>}
+              </For>
+            </select>
+          </div>
+          <div class="audio-settings__hint audio-settings__hint--info" role="note">
+            Mirrors the master, without the click, to that device while ASIO runs: capture that device in OBS
+            or the call. Pick one you don't listen on, such as a virtual cable: on the interface in your ears,
+            you hear everything twice. On WASAPI, capture BleepLoop's own output instead: it carries the click.
+          </div>
+        </Show>
         {/* F22's other half: the Share pick looks like the interface ASIO plays on (`sharesInterface`, a
             brand/model-word match: it cannot see the hardware). A caution in the amber note, never a
             block: the pick stays. */}

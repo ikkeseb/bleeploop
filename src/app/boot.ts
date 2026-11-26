@@ -1,4 +1,4 @@
-import { initAudioDeviceSettings, refreshAndPruneDevices } from '../ui/state/audio-devices';
+import { hasDeviceSettings, initAudioDeviceSettings, refreshAndPruneDevices } from '../ui/state/audio-devices';
 import {
   availablePlugins,
   legacyRigSnapshot,
@@ -12,7 +12,7 @@ import { boundKinds } from '../ui/state/rig-record';
 import { bindingsKnown } from '../ui/state/midi';
 import { nativeHostReady, setNativeHostReady } from '../ui/state/instrument-slots';
 import { notifyError } from '../notify';
-import { mintUnitId, platform, type PluginDescriptor } from '../platform';
+import { jackHost, mintUnitId, platform, type PluginDescriptor } from '../platform';
 import { announceLooper, refusalText, refuseOnLane } from '../ui/looper/gates';
 import {
   engineDevice,
@@ -64,7 +64,7 @@ export function bootEngine(): () => void {
   if (rigNative) holdDeviceOpens(opening);
   void (async () => {
     try {
-      if (platform.pluginHost.available) {
+      if (hasDeviceSettings()) {
         await initAudioDeviceSettings();
         await refreshAndPruneDevices();
       }
@@ -72,7 +72,7 @@ export function bootEngine(): () => void {
       await openEngineDevice();
       await whenDevice();
       if (disposed) return;
-      restoreEngineShare();
+      if (!jackHost) restoreEngineShare();
       stopAutosave = autosave.start(session);
       if (platform.chain.available) {
         // The native record's handover instead of legacy `recallRig`, on every chain-mode launch: a SYNTH or

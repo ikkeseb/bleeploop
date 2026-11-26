@@ -58,6 +58,15 @@ path (`EngineHost.snapshot` / `loadSession`).
   cpal 0.18.1 (pinned; ASIO a cargo opt-in feature), clack-host for CLAP, `vst3` for VST3, the
   project's own interface declarations for VST2, and midir for native MIDI input.
 
+The experimental Linux app runs the same engine on a duplex JACK callback. Its device adapter in
+`src-tauri/src/linux_audio/` owns the JACK client and links. It reuses the engine commands,
+session format and feed consumed by the desktop controls. A graph buffer preference can affect
+other clients, so the initial setting follows the server. JACK graph xruns and skipped callback
+frames are counted separately. A discontinuity in this client's frame clock invalidates an
+overlapping capture. A graph-only xrun invalidates a take when a live slot could have supplied
+external samples. A frame-contiguous built-in synth can still finish its take. Linux plugin hosting and external
+MIDI inputs are outside this adapter.
+
 ## Audio architecture
 
 The bus topology is `src-tauri/crates/lf-engine/src/engine.rs`'s header; the engine's rules are its

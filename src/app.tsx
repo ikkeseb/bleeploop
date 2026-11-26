@@ -19,8 +19,9 @@ import { StageView } from './ui/stage/StageView';
 import { currentStageView, setStageOpen, stageOpen, toggleStage } from './ui/stage/stage-store';
 import { TunerView } from './ui/tuner/TunerView';
 import * as layoutStore from './ui/layout/layout-store';
-import { installFrontendLogPipe, platform } from './platform';
+import { installFrontendLogPipe, jackHost, platform } from './platform';
 import { looper } from './ui/state/audio';
+import { hasDeviceSettings } from './ui/state/audio-devices';
 import { engineDevice, engineOpenFailure, engineResets } from './ui/state/engine-store';
 import { bootEngine } from './app/boot';
 import { installCloseGuard } from './app/close-guard';
@@ -52,7 +53,7 @@ export function App() {
   const showSettings = (page: SettingsPage) => {
     setHelpOpen(false);
     setUpdateOpen(false);
-    setSettingsPage(page);
+    setSettingsPage(jackHost && page === 'midi' ? 'device' : page);
     if (settingsOpen()) queueMicrotask(() => settingsEl?.focus());
     else setSettingsOpen(true);
   };
@@ -522,7 +523,7 @@ export function App() {
             </svg>
           </button>
           {/* Audio Settings gear: opens the global device/buffer-size popover. Native-only. */}
-          <Show when={platform.pluginHost.available}>
+          <Show when={hasDeviceSettings()}>
             <button
               type="button"
               class="tool tool--gear"
