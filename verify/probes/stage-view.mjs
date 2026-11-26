@@ -154,7 +154,8 @@ function scopeRig(k) {
     const c = el();
     const dpr = c.width / c.clientWidth;
     const pad = Math.round(Math.min(24, Math.max(12, 0.02 * c.clientHeight)) * dpr);
-    const x0 = pad + Math.round(44 * dpr);
+    const x0 = pad + Math.round(84 * dpr);
+    const frame = Math.round(8 * dpr);
     return {
       dw: c.width,
       dh: c.height,
@@ -162,8 +163,8 @@ function scopeRig(k) {
       top: Math.round(0.1 * c.height),
       unit: Math.max(6, Math.floor((0.78 * c.height) / 7)),
       x0,
-      tw: Math.max(8, c.width - pad - x0),
-      cw: (span) => Math.max(1, Math.ceil(((Math.max(8, c.width - pad - x0)) * k.bin) / span)),
+      tw: Math.max(8, c.width - pad - frame - x0),
+      cw: (span) => Math.max(1, Math.ceil(((Math.max(8, c.width - pad - frame - x0)) * k.bin) / span)),
     };
   };
   /** Bay `b`'s rectangle of the trace (0 the hero, then one per lane) over the trace's x fraction

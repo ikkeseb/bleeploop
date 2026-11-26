@@ -20,7 +20,12 @@ export const DPR_CAP = 1.5;
 export interface Palette {
   bg: string;
   surf1: string;
+  surfSel: string;
+  glass: string;
+  sunk: string;
+  rowLine: string;
   text: string;
+  legend: string;
   dim: string;
   faint: string;
   engaged: string;
@@ -35,15 +40,20 @@ export function readPalette(el: Element): Palette {
   const cs = getComputedStyle(el);
   const v = (name: string, fallback: string): string => cs.getPropertyValue(name).trim() || fallback;
   return {
-    bg: v('--bg', '#0a0b0e'),
-    surf1: v('--surf-1', '#121419'),
-    text: v('--text', '#eef1f8'),
-    dim: v('--dim', '#b9bcc6'),
-    faint: v('--faint', '#7d818d'),
-    engaged: v('--engaged', '#f4efe6'),
+    bg: v('--bg', '#111317'),
+    surf1: v('--surf-1', '#16181c'),
+    surfSel: v('--surf-sel', '#1d2024'),
+    glass: v('--glass', '#07090b'),
+    sunk: v('--sunk', '#0b0d10'),
+    rowLine: v('--row-line', '#0b0c0e'),
+    text: v('--text', '#e9ecef'),
+    legend: v('--legend', '#c3c8cf'),
+    dim: v('--dim', '#a9afb7'),
+    faint: v('--faint', '#8a9098'),
+    engaged: v('--engaged', '#fff3e0'),
     rec: v('--rec', '#ff3b52'),
     dub: v('--dub', '#ffae2a'),
-    play: v('--play', '#36e39a'),
+    play: v('--play', '#45d295'),
     cyan: v('--cyan', '#46d4e8'),
   };
 }
@@ -121,8 +131,9 @@ export function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
-/** The HUD's edge padding and message-line size (CSS px), as `stage.css` sizes them. */
+/** The HUD's edge padding, top command band height and message-line size (CSS px), as `stage.css` sizes them. */
 export const hudPad = (h: number): number => clamp(0.02 * h, 12, 24);
+export const hudBand = (h: number): number => clamp(0.074 * h, 48, 104);
 export const hudMsg = (h: number): number => clamp(0.045 * h, 28, 56);
 
 // ── The lane envelope ─────────────────────────────────────────────────────────────────────────────
