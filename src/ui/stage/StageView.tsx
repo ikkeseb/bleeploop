@@ -242,41 +242,60 @@ export function StageView(props: { onExit: () => void }) {
       <canvas class="sv-canvas" ref={canvas} aria-hidden="true" />
 
       <div class="sv-hud" classList={{ 'is-lit': lit() }}>
-        <div class="sv-chips" role="list" aria-label="Tracks">
-          <For each={lanes}>
-            {(l) => (
-              <span
-                class="sv-chip"
-                classList={{ 'is-selected': looper.selectedTrack() === l.i, 'is-stopping': l.stopping() }}
-                role="listitem"
-                data-state={DATA_STATE[l.displayState()]}
-                data-muted={l.word() === 'MUTED' ? 'true' : undefined}
-                aria-label={`Track ${l.i + 1}, ${spoken(l)}`}
-                aria-current={looper.selectedTrack() === l.i ? 'true' : undefined}
-              >
-                {l.i + 1}
-              </span>
-            )}
-          </For>
-        </div>
+        <div class="sv-band">
+          <div class="sv-chips" role="list" aria-label="Tracks">
+            <For each={lanes}>
+              {(l) => {
+                const state = () => DATA_STATE[l.displayState()];
+                const muted = () => l.word() === 'MUTED';
+                // The recipes' lit LED (.k-led.is-on): the bar while the lane sounds or listens, the D14
+                // rec lamp while it captures. A muted or stopped bar keeps stage.css's quiet unlit tone.
+                const sounds = () => !muted() && ['play', 'rec', 'dub', 'listening'].includes(state());
+                const captures = () => state() === 'rec' || state() === 'dub';
+                return (
+                  <span
+                    class="k-key sv-chip"
+                    classList={{ 'is-selected': looper.selectedTrack() === l.i, 'is-stopping': l.stopping() }}
+                    role="listitem"
+                    data-state={state()}
+                    data-muted={muted() ? 'true' : undefined}
+                    aria-label={`Track ${l.i + 1}, ${spoken(l)}`}
+                    aria-current={looper.selectedTrack() === l.i ? 'true' : undefined}
+                  >
+                    <span class="sv-chip__win" aria-hidden="true">
+                      <span class="k-led k-led--dot sv-chip__lamp" classList={{ 'is-on': captures() }} />
+                      <span class="k-led sv-chip__led" classList={{ 'is-on': sounds() }} />
+                    </span>
+                    <span class="sv-chip__num">{l.i + 1}</span>
+                  </span>
+                );
+              }}
+            </For>
+          </div>
 
-        <div class="sv-tempo">
-          <span class="sv-bpm" aria-label={`${Math.round(clock.bpm())} BPM`}>
-            {Math.round(clock.bpm())}
-          </span>
-          <Show when={live() || bars() > 0}>
-            <span class="sv-dots" role="img" aria-label={live() ? `Beat ${clock.beat() + 1}` : 'Transport idle'}>
-              <For each={beatIndices(perBar())}>
-                {(b) => <i class="sv-dot" classList={{ 'sv-dot--one': b === 0, 'is-on': live() && clock.beat() === b }} />}
-              </For>
-            </span>
-          </Show>
-          <Show when={bars() > 0}>
-            <span class="sv-bar" aria-label={`Bar ${loopBar()} of ${bars()}`}>
-              {loopBar()}
-              <span class="sv-bar__of"> / {bars()}</span>
-            </span>
-          </Show>
+          <div class="k-bezel sv-tempo">
+            <div class="k-glass sv-tempo__glass">
+              <span class="sv-bpm" aria-label={`${Math.round(clock.bpm())} BPM`}>
+                {Math.round(clock.bpm())}
+              </span>
+              <span class="sv-bpm-unit" aria-hidden="true">
+                BPM
+              </span>
+              <Show when={live() || bars() > 0}>
+                <span class="sv-dots" role="img" aria-label={live() ? `Beat ${clock.beat() + 1}` : 'Transport idle'}>
+                  <For each={beatIndices(perBar())}>
+                    {(b) => <i class="k-led k-led--dot sv-dot" classList={{ 'sv-dot--one': b === 0, 'is-on': live() && clock.beat() === b }} />}
+                  </For>
+                </span>
+              </Show>
+              <Show when={bars() > 0}>
+                <span class="sv-bar" aria-label={`Bar ${loopBar()} of ${bars()}`}>
+                  {loopBar()}
+                  <span class="sv-bar__of"> / {bars()}</span>
+                </span>
+              </Show>
+            </div>
+          </div>
         </div>
 
         <div class="sv-count" aria-live="assertive">
@@ -292,7 +311,7 @@ export function StageView(props: { onExit: () => void }) {
         <div class="sv-ctl" classList={{ 'is-idle': idle() }}>
           <button
             type="button"
-            class="sv-btn sv-btn--view"
+            class="k-key k-key--mo sv-btn sv-btn--view"
             tabindex="-1"
             aria-label={`Stage look: ${currentStageView().name.toLowerCase()}. Next look`}
             title="Next look (V)"
@@ -303,7 +322,7 @@ export function StageView(props: { onExit: () => void }) {
               <path d="M9 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
           </button>
-          <button type="button" class="sv-btn sv-btn--exit" tabindex="-1" aria-label="Exit stage view" title="Exit stage view (B or Esc)" onClick={props.onExit}>
+          <button type="button" class="k-key k-key--mo sv-btn sv-btn--exit" tabindex="-1" aria-label="Exit stage view" title="Exit stage view (B or Esc)" onClick={props.onExit}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <path d="M6 6l12 12M18 6L6 18" stroke-linecap="round" />
             </svg>

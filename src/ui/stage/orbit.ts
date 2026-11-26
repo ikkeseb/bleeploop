@@ -10,6 +10,7 @@ import {
   decay,
   env,
   holdsAudio,
+  hudBand,
   hudMsg,
   hudPad,
   laneChanged,
@@ -100,8 +101,8 @@ function createOrbit(): ViewDraw {
 
   function layout(s: Surface): void {
     dpr = s.dpr;
-    // The stack fills the height left above the message line, never more than 0.46 of the width a side.
-    const top = 6;
+    // The stack fills the height between the top HUD band and the message line, never more than 0.46 of the width a side.
+    const top = hudBand(s.h) + 8;
     const bottom = hudPad(s.h) + hudMsg(s.h) * 1.3 + 6;
     const half = Math.max(40, Math.min(0.46 * s.w, (s.h - top - bottom) / 2));
     // Outside ring 1: the selection circle (0.4 G), then the beat ticks.

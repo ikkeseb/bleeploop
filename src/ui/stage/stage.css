@@ -1,14 +1,17 @@
 /* Stage view (StageView.tsx): the performance layer, a visualizer first. One canvas holds the look
-   (drawn by the view modules from the same "Instrument" tokens, src/app.css header: --bg floor, colour
-   only for sound, warm-white for the selected lane, the count-in and a refused press); this sheet is
-   the thin HUD over it: Geist for words, Geist Mono for the changing numbers, no boxes but the lane
-   chips and two ghost buttons. Every size is fixed by the window (vh), so a state change never moves
-   the layout. The canvas views mirror --sv-pad and the message line's size (visual.ts hudPad/hudMsg). */
+   (drawn by the view modules from the same panel tokens, src/app.css header: --bg floor, colour only
+   for sound, warm-white for the selected lane, the count-in and a refused press); this sheet is the
+   panel HUD over it, built from the app.css recipes (.k-key, .k-led, .k-bezel > .k-glass) and type
+   roles (Instrument Sans: --font-name for lane numbers, --font-num for changing numerals, --font-legend
+   for caps). Every size is fixed by the window (vh), so a state change never moves the layout. The
+   canvas views mirror --sv-pad, --sv-band and the message line's size (visual.ts hudPad/hudBand/hudMsg). */
 
 .sv {
   --sv-pad: clamp(12px, 2vh, 24px);
-  --sv-chip: clamp(34px, 4.4vh, 48px);
-  --sv-num: clamp(22px, 3vh, 38px); /* the tempo read-outs */
+  --sv-band: clamp(48px, 7.4vh, 104px);
+  --sv-chip: clamp(36px, 5vh, 66px);
+  --sv-disp: clamp(36px, 5.6vh, 74px);
+  --sv-num: clamp(22px, 3.2vh, 44px); /* the tempo read-outs */
   position: fixed;
   inset: 0;
   z-index: 100; /* over the command-bar popovers (40), under the error toasts (200) */
@@ -32,10 +35,27 @@
   pointer-events: none;
 }
 
-/* The HUD rests at 0.7 and brightens for a moment when what it says changes. */
+/* ---- top command band: flat panel lit from above under grain, milled groove below ---- */
+.sv-band {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--sv-band);
+  padding: 0 var(--sv-pad);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sv-pad);
+  background: var(--grain), var(--band-light), var(--surf-1);
+  border-bottom: 2px solid var(--row-line);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+
+/* Subtle lift when state changes, while keeping panel contrast crisp at rest. */
 .sv-chips,
 .sv-tempo {
-  opacity: 0.7;
+  opacity: 0.92;
   transition: opacity 0.5s;
 }
 .sv-hud.is-lit .sv-chips,
@@ -44,91 +64,145 @@
   transition-duration: 0.08s;
 }
 
-/* ---- lane chips: state by colour, the selected one warm-white ---- */
+/* ---- lane keys: each a .k-key cap whose window (.sv-chip__win) holds a .k-led bar and the D14 round rec
+   lamp (.k-led--dot), lit by .is-on (StageView.tsx) in the lane's sound colour (--sc, handed to the
+   recipe as --led). Only what differs from the recipes is drawn here: the size, the bar's quiet unlit
+   tones, muted, the selected warm-white face. ---- */
 .sv-chips {
-  position: absolute;
-  top: var(--sv-pad);
-  left: var(--sv-pad);
   display: flex;
-  gap: clamp(5px, 0.8vh, 8px);
+  align-items: center;
+  gap: clamp(6px, 0.85vh, 10px);
 }
-.sv-chip {
-  --sc: var(--faint);
-  width: var(--sv-chip);
-  height: var(--sv-chip);
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  background: var(--surf-2);
-  border: 1px solid var(--edge);
-  font-size: calc(var(--sv-chip) * 0.62);
-  font-weight: 600;
-  line-height: 1;
+.sv-chip.k-key {
+  --sc: var(--faint); /* the lane's state colour: its number and its lit LEDs */
+  --led: var(--sc);
+  --kh: var(--sv-chip);
+  --wi: clamp(5px, 0.65vh, 8px); /* the window's inset from the cap's edge */
+  --wh: clamp(3px, 0.45vh, 5px); /* its height */
+  width: calc(var(--sv-chip) * 1.14);
+  padding: calc(var(--wi) + var(--wh) + 2px) 0 0;
+  font: 650 max(20.5px, calc(var(--sv-chip) * 0.54)) / 1 var(--font-name);
   font-variant-numeric: tabular-nums;
+  letter-spacing: normal;
   color: var(--sc);
+  transition: none; /* a lane's sound state lands on the frame the feed switches it (app.css MOTION) */
 }
+.sv-chip__num {
+  display: block;
+  line-height: 1;
+}
+.sv-chip__win {
+  position: absolute;
+  top: var(--wi);
+  left: var(--wi);
+  right: var(--wi);
+  height: var(--wh);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.sv-chip .k-led {
+  transition: none;
+}
+.k-led.sv-chip__led {
+  flex: 1 1 auto;
+  width: auto;
+  height: 100%;
+  border-radius: 1.5px;
+}
+.k-led.sv-chip__lamp {
+  display: none;
+  width: var(--wh);
+  height: var(--wh);
+}
+/* D14: the rec lamp shows while the lane captures (lit) or waits to (ARMED: its dark socket) */
+.sv-chip:is([data-state='rec'], [data-state='dub'], [data-state='armed']) .sv-chip__lamp {
+  display: block;
+}
+
+/* State colour mapping (kept in step with the probe's chip contract) */
 .sv-chip[data-state='stop'] { --sc: var(--dim); }
 .sv-chip[data-state='play'] { --sc: var(--play); }
 .sv-chip[data-state='rec'] { --sc: var(--rec); }
 .sv-chip[data-state='dub'] { --sc: var(--dub); }
 .sv-chip[data-state='armed'] { --sc: var(--dub); }
-.sv-chip[data-state='listening'] { --sc: var(--cyan); } /* the surface language's LISTEN colour */
-/* MUTED over a playing or stopped take: grey on a sunk face */
-.sv-chip[data-muted] {
-  --sc: var(--faint);
-  background: var(--sunk);
+.sv-chip[data-state='listening'] { --sc: var(--cyan); }
+.sv-chip.is-stopping { --sc: var(--dub); }
+
+/* A held loop that is silent keeps a quiet unglowing light, as the looper lane's bar does (looper.css):
+   STOPPED grey between EMPTY and PLAYING, MUTED the silent tone turned down; EMPTY alone is a dark lens. */
+.sv-chip[data-state='stop']:not([data-muted]) .sv-chip__led {
+  background: color-mix(in srgb, #a4a8b3 60%, var(--led-socket));
 }
-/* a pending stop reads amber, as the looper lane's ENDING does */
-.sv-chip.is-stopping {
-  --sc: var(--dub);
+.sv-chip[data-muted] .sv-chip__led {
+  background: color-mix(in srgb, var(--faint) 42%, var(--led-socket));
 }
-/* a capture carries its colour on the edge too: recording pulses, an armed wait blinks */
-.sv-chip[data-state='rec'],
-.sv-chip[data-state='dub'],
-.sv-chip[data-state='armed'],
-.sv-chip[data-state='listening'] {
-  border-color: var(--sc);
+/* ARMED: bar at half light beside the D14 rec lamp's unlit socket (as looper.css) */
+.sv-chip[data-state='armed'] .sv-chip__led {
+  background: color-mix(in srgb, var(--sc) 55%, var(--led-socket));
+  box-shadow: 0 0 4px color-mix(in srgb, var(--sc) 40%, transparent);
 }
+/* Recording pulses gently (pinned by the stage-view probe); listening breathes its LED bar */
 .sv-chip[data-state='rec'] {
   animation: sv-rec 1s ease-in-out infinite alternate;
 }
-.sv-chip[data-state='armed'] {
-  animation: sv-armed 0.5s steps(2, jump-none) infinite;
+.sv-chip[data-state='listening'] .sv-chip__led {
+  animation: sv-listen 1.4s ease-in-out infinite;
 }
 @keyframes sv-rec {
   from {
-    opacity: 0.55;
+    opacity: 0.6;
   }
 }
-@keyframes sv-armed {
-  from {
-    border-color: transparent;
+@keyframes sv-listen {
+  0%,
+  100% {
+    opacity: 0.4;
   }
-}
-/* The selected lane: the warm-white face, switched with no transition so a pedal press reads at once;
-   a capture keeps its colour as a ring around it. */
-.sv-chip.is-selected {
-  background: var(--engaged);
-  border-color: var(--engaged);
-  color: var(--bg);
-}
-.sv-chip.is-selected[data-state='rec'],
-.sv-chip.is-selected[data-state='dub'],
-.sv-chip.is-selected[data-state='armed'],
-.sv-chip.is-selected[data-state='listening'] {
-  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--sc);
+  50% {
+    opacity: 1;
+  }
 }
 
-/* ---- tempo: BPM, the beat, the bar of the loop ---- */
+/* MUTED over a playing or stopped take: sunk/quiet cap face, faint number */
+.sv-chip[data-muted] {
+  --sc: var(--faint);
+  background: var(--cap-off);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 2px 0 #111316, 0 3px 0 #050607, 0 4px 5px rgba(0, 0, 0, 0.35);
+}
+
+/* Selected lane: warm-white key cap with dark number; no decorative outer ring.
+   background-color stays var(--engaged) for the probe's face contract; the recessed LED bar inside
+   the cap still carries the lane's sound colour (and D14 rec lamp while capturing). */
+.sv-chip.is-selected {
+  background-color: var(--engaged);
+  background-image: linear-gradient(rgba(255, 255, 255, 0.28), rgba(0, 0, 0, 0.08));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65), inset 0 -1px 0 rgba(0, 0, 0, 0.18), 0 3px 0 #9b9181, var(--cap-contact);
+  color: var(--bg);
+}
+/* Give the LED window on the warm-white cap a crisp dark bezel without squeezing the LED height. */
+.sv-chip.is-selected .sv-chip__win {
+  top: calc(var(--wi) - 1.5px);
+  left: calc(var(--wi) - 1.5px);
+  right: calc(var(--wi) - 1.5px);
+  height: calc(var(--wh) + 3px);
+  padding: 1.5px;
+  border-radius: 3px;
+  background: #16181c;
+}
+
+/* ---- tempo: recessed .k-bezel > .k-glass display window (BPM · beat lamps · loop bar) ---- */
 .sv-tempo {
-  position: absolute;
-  top: var(--sv-pad);
-  right: var(--sv-pad);
-  height: var(--sv-chip);
+  flex: none;
+  height: var(--sv-disp);
+}
+.sv-tempo__glass {
+  height: 100%;
+  padding: 0 clamp(12px, 1.6vh, 22px);
   display: flex;
   align-items: center;
-  gap: clamp(12px, 1.8vh, 22px);
-  font-family: var(--mono);
+  gap: clamp(12px, 1.6vh, 22px);
+  font-family: var(--font-num);
   font-size: var(--sv-num);
   font-weight: 500;
   line-height: 1;
@@ -136,31 +210,38 @@
   white-space: nowrap;
 }
 .sv-bpm {
-  color: var(--dim);
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.sv-bpm-unit {
+  margin-left: calc(-1 * clamp(7px, 1vh, 14px));
+  align-self: center;
+  font: 600 clamp(10px, 1.15vh, 14px) / 1 var(--font-legend);
+  letter-spacing: 0.06em;
+  color: var(--faint);
 }
 .sv-dots {
   display: flex;
   align-items: center;
-  gap: clamp(10px, 1.3vh, 14px);
+  gap: clamp(8px, 1.1vh, 14px);
 }
-/* each dot keeps a fixed box, so the sounding one grows without moving its neighbours */
 .sv-dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--faint);
-  opacity: 0.6;
+  --dot: clamp(9px, 1.15vh, 14px);
+  width: var(--dot);
+  height: var(--dot);
+  background: #15181e;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 0 1px rgba(255, 255, 255, 0.11);
+  transition: none; /* beats land on the frame the clock fires */
 }
-.sv-dot--one {
-  box-shadow: 0 0 0 1px var(--bg), 0 0 0 2px var(--engaged);
+.sv-dot--one:not(.is-on) {
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 0 1px rgba(255, 243, 224, 0.34);
 }
 .sv-dot.is-on {
   background: var(--engaged);
-  opacity: 1;
-  transform: scale(1.33); /* 16 px: the beat reads as a blink from across the room */
+  box-shadow: 0 0 6px 1px color-mix(in srgb, var(--engaged) 55%, transparent), 0 0 2px color-mix(in srgb, var(--engaged) 90%, transparent);
 }
 .sv-bar {
-  min-width: 4.2ch; /* "32 / 32" never moves the dots */
+  min-width: 4ch; /* "32 / 32" never moves the dots */
   text-align: right;
   color: var(--text);
 }
@@ -174,7 +255,7 @@
   left: var(--sv-count-x, 50%);
   top: var(--sv-count-y, 50%);
   transform: translate(-50%, -50%);
-  font-family: var(--mono);
+  font-family: var(--font-num);
   font-size: var(--sv-count-size, 30vh);
   font-weight: 600;
   line-height: 1;
@@ -182,7 +263,7 @@
   color: var(--engaged);
 }
 .sv-count__n {
-  display: block; /* at line-height 1 a Geist Mono digit's ink is centred on its box, so on the anchor */
+  display: block; /* at line-height 1 an Instrument Sans digit's ink sits centred on the anchor */
   animation:
     sv-count-in 0.12s ease-out,
     sv-count-fade var(--sv-beat, 0.5s) linear forwards;
@@ -208,10 +289,11 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-family: var(--font-legend);
   font-size: clamp(28px, 4.5vh, 56px); /* the one text a player must read from 3 m */
   font-weight: 600;
   line-height: 1.3;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--dim);
   transition: opacity 0.08s;
@@ -231,7 +313,7 @@
 .sv-msg[data-tone='listen'] { color: var(--cyan); }
 .sv-msg[data-tone='take'] { color: var(--rec); }
 
-/* ---- the two ghost buttons: the view switch and exit; they hide when the pointer rests ---- */
+/* ---- the two momentary keys: look switch and exit; they hide when the pointer rests ---- */
 .sv-ctl {
   position: absolute;
   right: var(--sv-pad);
@@ -246,39 +328,26 @@
   pointer-events: none;
 }
 .sv-btn {
-  appearance: none;
-  height: clamp(32px, 4vh, 44px);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 0 10px 0 14px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--surf-2) 60%, transparent);
-  border: 1px solid var(--edge);
-  font-family: var(--sans);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.16em;
-  color: var(--dim);
-  cursor: pointer;
+  --kh: clamp(32px, 4vh, 46px);
+  font-size: clamp(12px, 1.35vh, 16px);
+  letter-spacing: 0.08em;
 }
-.sv-btn:hover {
-  color: var(--text);
-  background: var(--surf-3);
+.sv-btn--view {
+  padding: 0 clamp(10px, 1.2vh, 14px) 0 clamp(12px, 1.4vh, 18px);
+  gap: 6px;
 }
 .sv-btn svg {
-  width: 14px;
-  height: 14px;
+  width: clamp(14px, 1.5vh, 18px);
+  height: clamp(14px, 1.5vh, 18px);
 }
 .sv-btn--exit {
-  width: clamp(32px, 4vh, 44px);
+  width: var(--kh);
   padding: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .sv-chip[data-state='rec'],
-  .sv-chip[data-state='armed'],
+  .sv-chip[data-state='listening'] .sv-chip__led,
   .sv-count__n {
     animation: none;
   }

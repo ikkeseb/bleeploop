@@ -9,6 +9,7 @@ import {
   decay,
   env,
   holdsAudio,
+  hudBand,
   hudMsg,
   hudPad,
   laneChanged,
@@ -299,8 +300,8 @@ function createEmber(): ViewDraw {
   function layout(s: Surface): void {
     const pal = s.pal;
     dpr = s.dpr;
-    // The stack fills the height left above the message line, never more than 0.47 of the width a side.
-    const top = 6;
+    // The stack fills the height between the top HUD band and the message line, never more than 0.47 of the width a side.
+    const top = hudBand(s.h) + 8;
     const bottom = hudPad(s.h) + hudMsg(s.h) * 1.3 + 6;
     const half = Math.max(40, Math.min(0.47 * s.w, (s.h - top - bottom) / 2));
     // Outside ring 1 only its band's reach (0.46 S, 0.08 R) and its bloom.

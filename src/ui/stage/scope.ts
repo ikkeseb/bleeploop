@@ -9,10 +9,13 @@ import {
   decay,
   env,
   holdsAudio,
+  hudBand,
+  hudMsg,
   hudPad,
   laneChanged,
   light,
   lightColor,
+  mutedLook,
   peaks,
   sampleEnvelope,
   waitColor,
@@ -56,9 +59,11 @@ const BAYS = LANES + 1; // the hero, then one bay per lane
 const SOURCES = SCOPE_MASTER + 1; // a batch's sources: lanes 0..4, the monitor, the master output
 const HERO = 2; // the hero's height, in lane units
 const UNITS = HERO + LANES;
-const BAND_TOP = 0.1; // of the height: under the chips
+const BAND_TOP = 0.1; // of the height: under the top HUD band
 const BAND = 0.78; // of the height: above the message line
-const GUTTER = 44; // CSS px: the column that carries the bay names
+const HUD_GAP = 8; // CSS px: the card's least gap under the HUD band (as ORBIT and EMBER)
+const GUTTER = 84; // CSS px: the head column that carries OUT/IN and the lane numbers
+const FRAME = 8; // CSS px: the panel card's frame around top, right and bottom of the recessed glass pane
 const LANE_NAMES = ['1', '2', '3', '4', '5'];
 /** With no master loop the sweep is a fixed window, so a first take still sweeps (about 2 s at 48 kHz). */
 const FALLBACK_COLUMNS = 512;
@@ -66,13 +71,15 @@ const FALLBACK_COLUMNS = 512;
  * permanent line (0.01 is about -40 dB). */
 const FLOOR = 0.01;
 /** The bar ticks, in the looper grid's tint. Deliberately under the pixel census's floor (max channel
- * 40) over `--surf-1`: the chrome covers whole bays, and the census counts it against a playing lane's
+ * 40) over `--glass`: the chrome covers whole bays, and the census counts it against a playing lane's
  * light (`empty.lit < play.lit / 3`). */
 const TICK = 'rgba(148,168,215,.07)';
-/** The well's one hairline of top light, and the selected bay's tone step: both under that same floor
- * over `--surf-1`, which is why the step starts below the hairline rather than under it. */
-const HAIR_A = 0.06;
-const STEP_A = 0.045;
+/** The selected row's lift inside the recessed pane, which no token names: it stays well below the
+ * pixel census's 40-channel floor over `--glass` (#07090b). The pane's hairlines and the card's top
+ * light are the palette's (`--glass-line`, `--glass-top`, `--hair`). */
+const GLASS_SEL = '#0d1014';
+/** The light edge of `--groove` (a compound shadow, not a colour token: keep the two equal). */
+const GROOVE_HI = 'rgba(255,255,255,0.035)';
 /**
  * The look's two knobs. Under `'lighter'`, light added at alpha ADD and dimmed by FADE before the next
  * pass lands converges on ADD / FADE of its colour: a locked loud lane settles near 0.75 of its own
@@ -143,17 +150,30 @@ function createScope(): ViewDraw {
   let th = 0;
   let unit = 0;
   let px = 0; // the HUD's side inset
-  let ww = 0; // and the well's width inside it
-  let x0 = 0; // the trace's left edge, past the gutter
+  let ww = 0; // the panel card's width
+  let frame = 8; // the panel card's top/right/bottom frame around the recessed glass pane
+  let bezel = 3; // the `--sunk` recessed border around the glass pane
+  let rCard = 8; // `--r-card`
+  let rWell = 6; // `--r-well`
+  let x0 = 0; // the trace's left edge, past the head column
   let tw = 0; // and its width
   let hair = 1;
+  let groove = 2;
   let line = 2;
   let core = 2;
   let glow = 14;
-  let edge = 6;
   let grow = 2; // how far the monitor's glow reaches past its line
-  let nameFont = '';
-  let nameX = 0;
+  let legendFont = '';
+  let numFont = '';
+  let headMid = 0;
+  let sheen: CanvasGradient | null = null;
+  let topShadow: CanvasGradient | null = null;
+  // The card's and the glass pane's outlines, built in `layout`: the pane on the still bitmap and on
+  // the stage canvas, where every live mark (the trace, the beams, a flash, a hairline) is clipped to
+  // it without a path built per frame.
+  let card: Path2D | null = null;
+  let well: Path2D | null = null;
+  let liveWell: Path2D | null = null;
   // CSS px, for the hit test.
   let laneTopCss = 0;
   let laneCss = 1;
@@ -207,33 +227,59 @@ function createScope(): ViewDraw {
   function layout(s: Surface): void {
     dpr = s.dpr;
     W = s.dw;
-    top = Math.round(BAND_TOP * s.dh);
-    unit = Math.max(6, Math.floor((BAND * s.dh) / UNITS));
+    frame = Math.round(FRAME * dpr);
+    // The card's outer edges: the band's proportions where they fit, else clear of the HUD band above
+    // and the message line below (the edges ORBIT and EMBER keep), so a short window shrinks the bays.
+    const band = Math.round(BAND_TOP * s.dh);
+    const cardTop = Math.max(band - frame, Math.round((hudBand(s.h) + HUD_GAP) * dpr));
+    const cardBottom = Math.min(band + Math.floor(BAND * s.dh) + frame, s.dh - Math.round((hudPad(s.h) + hudMsg(s.h) * 1.3 + 6) * dpr));
+    top = cardTop + frame;
+    unit = Math.max(6, Math.floor((cardBottom - frame - top) / UNITS));
     th = UNITS * unit;
     px = Math.round(hudPad(s.h) * dpr);
     ww = Math.max(8, W - 2 * px);
+    bezel = Math.max(2, Math.round(3 * dpr));
+    rCard = Math.round(8 * dpr);
+    rWell = Math.round(6 * dpr);
     x0 = px + Math.round(GUTTER * dpr);
-    tw = Math.max(8, W - px - x0);
+    tw = Math.max(8, W - px - frame - x0);
     for (let b = 0; b < BAYS; b++) {
       bayY[b] = b === 0 ? 0 : HERO * unit + (b - 1) * unit;
       bayH[b] = b === 0 ? HERO * unit : unit;
       reach[b] = bayH[b] * LIVE_REACH;
     }
     hair = Math.max(1, Math.round(dpr));
+    groove = Math.max(2, Math.round(2 * dpr));
     line = Math.max(1, Math.round(1.5 * dpr));
     core = Math.max(2, Math.round(2 * dpr));
     glow = Math.max(core + 2, Math.round(14 * dpr));
-    edge = Math.round(6 * dpr);
     grow = Math.max(1, Math.round(2 * dpr));
-    // The app's numerals face (`--font-num` in src/app.css), as the panel prints its read-outs.
-    nameFont = `500 ${Math.round(12 * dpr)}px 'Instrument Sans', system-ui, sans-serif`;
-    nameX = px + Math.round(11 * dpr);
+    // Legends (`--font-legend`: 600 caps) for OUT/IN, large `--font-name` for lane numbers.
+    const legPx = Math.round(clamp(0.013 * s.h, 12, 17) * dpr);
+    const numPx = Math.round(clamp(unit * 0.56, 26 * dpr, 82 * dpr));
+    legendFont = `600 ${legPx}px 'Instrument Sans', system-ui, sans-serif`;
+    numFont = `650 ${numPx}px 'Instrument Sans', system-ui, sans-serif`;
+    headMid = px + ((x0 - bezel - px) >> 1);
     laneTopCss = (top + HERO * unit) / dpr;
     laneCss = unit / dpr;
     back.width = W;
-    back.height = th;
+    back.height = th + 2 * frame;
     trace.width = tw;
     trace.height = th;
+    card = new Path2D();
+    card.roundRect(px, 0, ww, th + 2 * frame, rCard);
+    well = new Path2D();
+    well.roundRect(x0, frame, tw, th, rWell);
+    liveWell = new Path2D();
+    liveWell.roundRect(x0, top, tw, th, rWell);
+    if (bctx) {
+      sheen = bctx.createLinearGradient(0, frame, 0, frame + Math.round(bayH[0] * 0.35));
+      sheen.addColorStop(0, 'rgba(255,255,255,0.032)');
+      sheen.addColorStop(1, 'rgba(255,255,255,0)');
+      topShadow = bctx.createLinearGradient(0, frame, 0, frame + Math.round(10 * dpr));
+      topShadow.addColorStop(0, 'rgba(0,0,0,0.85)');
+      topShadow.addColorStop(1, 'rgba(0,0,0,0)');
+    }
     s.countX = s.w / 2;
     s.countY = (top + th / 2) / dpr;
     s.countSize = clamp(0.36 * s.h, 140, 480);
@@ -249,24 +295,37 @@ function createScope(): ViewDraw {
     resized = true;
   }
 
-  /** Bay `b`'s well over [x, x + w): the tone step, its one hairline of top light, the bar ticks. */
-  function chrome(pal: Palette, b: number, x: number, w: number): void {
+  /** Head-number tone for lane `i`: 2 selected (warm white), 1 sounding (--legend), 0 silent (--faint). */
+  function laneTone(i: number): number {
+    if (i === feed.selected) return 2;
+    const k = feed.kind[i];
+    return k === 'rec' || k === 'dub' || (k === 'play' && !mutedLook(i)) ? 1 : 0;
+  }
+
+  /** One bay row's recessed glass floor, hairline separator, top sheen (hero) and bar ticks. */
+  function glassBay(pal: Palette, b: number, x: number, w: number): void {
     const c = bctx;
     if (!c) return;
-    const y = bayY[b];
+    const y = frame + bayY[b];
     const h = bayH[b];
     c.globalAlpha = 1;
-    c.fillStyle = pal.surf1;
+    c.fillStyle = b > 0 && b - 1 === feed.selected ? GLASS_SEL : pal.glass;
     c.fillRect(x, y, w, h);
-    if (b > 0 && b - 1 === feed.selected) {
-      c.globalAlpha = A[(STEP_A * 255) | 0];
-      c.fillStyle = pal.text;
-      c.fillRect(x, y + hair, w, h - hair);
+    if (b === 0) {
+      if (sheen) {
+        c.fillStyle = sheen;
+        c.fillRect(x, y, w, Math.round(h * 0.35));
+      }
+      if (topShadow) {
+        c.fillStyle = topShadow;
+        c.fillRect(x, y, w, Math.round(10 * dpr));
+      }
+      c.fillStyle = pal.glassTop;
+      c.fillRect(x, y, w, hair);
+    } else {
+      c.fillStyle = pal.glassLine;
+      c.fillRect(x, y, w, hair);
     }
-    c.globalAlpha = A[(HAIR_A * 255) | 0];
-    c.fillStyle = pal.text;
-    c.fillRect(x, y, w, hair);
-    c.globalAlpha = 1;
     // The grid still has to read inside a multi-bar sweep; a first take has no bars yet.
     const bars = feed.beatsPerLoop / feed.beatsPerBar;
     if (bars > 0) {
@@ -278,27 +337,109 @@ function createScope(): ViewDraw {
     }
   }
 
-  /** The whole still bitmap: every well, the bay names in the gutter and the selection's mark. Each
-   * lane's contour follows from its own band redraw (the stamps are forced stale). */
-  function redrawAll(pal: Palette): void {
+  /** Lane `i`'s head cell on the left panel column: panel tone (`--surf-sel` when selected), milled
+   * groove above it, and its large `--font-name` number, clipped to the card. */
+  function drawLaneHead(pal: Palette, i: number): void {
     const c = bctx;
-    if (!c) return;
-    c.clearRect(0, 0, W, th);
-    for (let b = 0; b < BAYS; b++) chrome(pal, b, px, ww);
+    if (!c || !card) return;
+    const b = i + 1;
+    const y = frame + bayY[b];
+    const hw = x0 - bezel - px;
+    const fillH = i === LANES - 1 ? unit + frame : unit;
+    c.save();
+    c.clip(card);
     c.globalAlpha = 1;
-    c.fillStyle = pal.engaged;
-    c.fillRect(px, bayY[feed.selected + 1], edge, unit);
-    c.font = nameFont;
+    c.fillStyle = i === feed.selected ? pal.surfSel : pal.surf1;
+    c.fillRect(px, y, hw, fillH);
+    // Milled groove separating rows (matches `--groove` on the looper lanes).
+    c.fillStyle = pal.rowLine;
+    c.fillRect(px, y, hw, groove);
+    c.fillStyle = GROOVE_HI;
+    c.fillRect(px, y + groove, hw, hair);
+    const tone = laneTone(i);
+    c.font = numFont;
     c.textBaseline = 'middle';
-    c.textAlign = 'left';
-    c.fillStyle = pal.faint;
-    c.fillText('OUT', nameX, bayY[0] + (unit >> 1));
-    c.fillStyle = pal.cyan; // IN takes the monitor line's own colour
-    c.fillText('IN', nameX, bayY[0] + unit + (unit >> 1));
-    for (let i = 0; i < LANES; i++) {
-      c.fillStyle = i === feed.selected ? pal.engaged : pal.faint;
-      c.fillText(LANE_NAMES[i], nameX, bayY[i + 1] + (unit >> 1));
+    c.textAlign = 'center';
+    c.fillStyle = tone === 2 ? pal.engaged : tone === 1 ? pal.legend : pal.faint;
+    c.fillText(LANE_NAMES[i], headMid, y + (unit >> 1) + Math.round(1 * dpr));
+    c.restore();
+  }
+
+  /**
+   * The still bitmap's device rows `y0` up to `y1`, cleared and painted whole, every layer in one order
+   * under a pixel-aligned clip, so any band of rows comes out exactly as a full repaint draws it: the
+   * panel card, the head column with OUT/IN and the lane numbers, the recessed glass pane and its bays
+   * with their bar ticks, and the card's seam. A band repainted over itself never stacks the
+   * antialiased edges of the card or the pane. The contours are `rasterise`'s.
+   */
+  function paintRows(pal: Palette, y0: number, y1: number): void {
+    const c = bctx;
+    if (!c || !card || !well) return;
+    const ch = th + 2 * frame;
+    c.save();
+    c.beginPath();
+    c.rect(0, y0, W, y1 - y0);
+    c.clip();
+    c.clearRect(0, y0, W, y1 - y0);
+    c.globalAlpha = 1;
+
+    // 1. Panel card (`--surf-1`, radius `--r-card`, the card's top light `--hair`).
+    c.save();
+    c.fillStyle = pal.surf1;
+    c.fill(card);
+    c.clip(card);
+    c.fillStyle = pal.hair;
+    c.fillRect(px, 0, ww, hair);
+
+    // 2. Hero head legends: OUT (`--dim`) and IN (`--cyan`), `--font-legend` caps with tracking.
+    if (y0 < frame + bayY[1]) {
+      c.font = legendFont;
+      c.textBaseline = 'middle';
+      c.textAlign = 'center';
+      c.letterSpacing = '0.08em';
+      c.fillStyle = pal.dim;
+      c.fillText('OUT', headMid, frame + (unit >> 1));
+      c.fillStyle = pal.cyan;
+      c.fillText('IN', headMid, frame + unit + (unit >> 1));
+      c.letterSpacing = '0px';
     }
+    c.restore();
+
+    // 3. Lane heads (1..5) the band reaches: selected one tone up (`--surf-sel`), no lit left edge bar.
+    for (let i = 0; i < LANES; i++) {
+      const y = frame + bayY[i + 1];
+      if (y < y1 && (i === LANES - 1 ? ch : y + unit) > y0) drawLaneHead(pal, i);
+    }
+
+    // 4. Recessed glass bezel (`--sunk`) framing the one continuous glass pane (`--r-well`).
+    c.fillStyle = pal.sunk;
+    c.beginPath();
+    c.roundRect(x0 - bezel, frame - bezel, tw + 2 * bezel, th + 2 * bezel, rWell + bezel);
+    c.fill();
+
+    // 5. The bays the band reaches, inside the clipped glass pane.
+    c.save();
+    c.clip(well);
+    for (let b = 0; b < BAYS; b++) {
+      const y = frame + bayY[b];
+      if (y < y1 && y + bayH[b] > y0) glassBay(pal, b, x0, tw);
+    }
+    c.restore();
+
+    // 6. Crisp dark seam framing the panel card on `--bg`.
+    c.strokeStyle = 'rgba(0,0,0,0.6)';
+    c.lineWidth = hair;
+    c.beginPath();
+    c.roundRect(px + hair * 0.5, hair * 0.5, ww - hair, ch - hair, rCard);
+    c.stroke();
+    c.restore();
+  }
+
+  /** The whole still bitmap. The hero's rows paint here; each lane's band, contour and all, follows in
+   * the same frame from its own `rasterise` (its stamp forced stale), so no row paints twice. */
+  function redrawAll(pal: Palette): void {
+    if (!bctx) return;
+    paintRows(pal, 0, frame + bayY[1]);
     shownSel = feed.selected;
     shownBeats = feed.beatsPerLoop;
     shownPerBar = feed.beatsPerBar;
@@ -318,29 +459,37 @@ function createScope(): ViewDraw {
   }
 
   /**
-   * Lane `i`'s band of the still bitmap: its recorded take as the dim contour under the live light, in
-   * two passes over each other (the looper lane's envelope). Only the trace rectangle is repainted, so
-   * the gutter's name and the selection's edge survive a recording take's redraw every frame.
+   * Lane `i`'s band of the still bitmap: its rows repainted whole (`paintRows`: the head cell, the glass
+   * bay, and for the last lane the card's bottom frame and corners), then its recorded take as the dim
+   * contour under the live light, in two passes over each other (the looper lane's envelope), clipped
+   * to its bay (a loud take never reaches a neighbour's rows) and to the glass pane, so its bottom
+   * corners stay round.
    */
   function rasterise(pal: Palette, i: number): void {
     const c = bctx;
-    if (!c) return;
+    if (!c || !well) return;
     const b = i + 1;
-    c.clearRect(x0, bayY[b], tw, unit);
-    chrome(pal, b, x0, tw);
+    const y0 = frame + bayY[b];
+    paintRows(pal, y0, i === LANES - 1 ? th + 2 * frame : y0 + bayH[b]);
     const span = stamp.span[i];
     looper.peaksInto(i, peaks);
     const cols = holdsAudio(feed.kind[i]) ? sampleEnvelope(tw, span > 0 ? span / PEAK_FRAMES : peaks.count) : 0;
-    if (cols <= 0) return;
-    const mid = bayY[b] + (unit >> 1);
-    const r = unit * CONTOUR_REACH;
-    const mul = contourAlpha(i);
-    c.fillStyle = contourColor(pal, i);
-    c.globalAlpha = A[(0.34 * mul * 255) | 0];
-    layer(c, cols, mid, r, env.hi, env.lo);
-    c.globalAlpha = A[(0.95 * mul * 255) | 0];
-    layer(c, cols, mid, r, env.body, null);
-    c.globalAlpha = 1;
+    if (cols > 0) {
+      const mid = y0 + (unit >> 1);
+      const r = unit * CONTOUR_REACH;
+      const mul = contourAlpha(i);
+      c.save();
+      c.beginPath();
+      c.rect(x0, y0, tw, bayH[b]);
+      c.clip();
+      c.clip(well);
+      c.fillStyle = contourColor(pal, i);
+      c.globalAlpha = A[(0.34 * mul * 255) | 0];
+      layer(c, cols, mid, r, env.hi, env.lo);
+      c.globalAlpha = A[(0.95 * mul * 255) | 0];
+      layer(c, cols, mid, r, env.body, null);
+      c.restore();
+    }
   }
 
   /**
@@ -658,7 +807,10 @@ function createScope(): ViewDraw {
     c.fillStyle = pal.bg;
     c.fillRect(0, 0, s.dw, s.dh);
     c.globalAlpha = A[(light.dim * 255) | 0];
-    c.drawImage(back, 0, top);
+    c.drawImage(back, 0, top - frame);
+    // Every live mark below lands inside the glass pane, never on its rounded corners or the bezel.
+    c.save();
+    if (liveWell) c.clip(liveWell);
     if (held) {
       c.globalCompositeOperation = quiet ? 'source-over' : 'lighter';
       c.drawImage(trace, x0, top);
@@ -700,7 +852,7 @@ function createScope(): ViewDraw {
       c.globalCompositeOperation = 'source-over';
     }
 
-    // A refused press flashes its bay, and a waiting lane's hairline says what it waits for.
+    // A refused press flashes its bay (the glass only), and a waiting lane's hairline says what it waits for.
     for (let i = 0; i < LANES; i++) {
       const y = top + bayY[i + 1];
       const kind = feed.kind[i];
@@ -709,7 +861,7 @@ function createScope(): ViewDraw {
         if (cue > 0) {
           c.globalAlpha = A[(0.12 * cue * 255) | 0];
           c.fillStyle = pal.engaged;
-          c.fillRect(px, y, ww, unit);
+          c.fillRect(x0, y, tw, unit);
         }
       }
       if (kind === 'armed' || kind === 'listening') {
@@ -725,6 +877,7 @@ function createScope(): ViewDraw {
         c.fillRect(x0, y + (unit >> 1), tw, line);
       }
     }
+    c.restore();
     c.globalAlpha = 1;
   }
 

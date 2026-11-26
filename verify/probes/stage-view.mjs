@@ -13,9 +13,10 @@
  *   across looks; one canvas, its backing store at the device-pixel ratio capped at 1.5 (checked at a
  *   ratio of 2), sized on resize.
  * - chips: for EMPTY, ARMED (count-in), LISTENING, REC, PLAY, STOP, MUTED, DUB and an ARMED later take,
- *   each chip's data-state and number colour follow the lane the feed reports and its accessible name
- *   says the state; the selected chip carries aria-current and the warm face; chips never move; no
- *   state word, dB, loop seconds or MUTE/REV flag is left in the view.
+ *   each chip's data-state and number colour (read on the number's own element) follow the lane the
+ *   feed reports and its accessible name says the state; a REC and a DUB chip show the D14 rec lamp lit
+ *   in their colour, a PLAY and an EMPTY chip none; the selected chip carries aria-current and the warm
+ *   face; chips never move; no state word, dB, loop seconds or MUTE/REV flag is left in the view.
  * - pixels (per look): the canvas follows the feed: a PLAYING lane draws in the play colour, MUTED in
  *   grey with no play colour, EMPTY near nothing, REC in rec-red, an overdub adds amber; the warm-white
  *   selection mark moves when a digit selects another lane; at rest the loop is cued at its start (no
@@ -154,7 +155,8 @@ function scopeRig(k) {
     const c = el();
     const dpr = c.width / c.clientWidth;
     const pad = Math.round(Math.min(24, Math.max(12, 0.02 * c.clientHeight)) * dpr);
-    const x0 = pad + Math.round(44 * dpr);
+    const x0 = pad + Math.round(84 * dpr);
+    const frame = Math.round(8 * dpr);
     return {
       dw: c.width,
       dh: c.height,
@@ -162,8 +164,8 @@ function scopeRig(k) {
       top: Math.round(0.1 * c.height),
       unit: Math.max(6, Math.floor((0.78 * c.height) / 7)),
       x0,
-      tw: Math.max(8, c.width - pad - x0),
-      cw: (span) => Math.max(1, Math.ceil(((Math.max(8, c.width - pad - x0)) * k.bin) / span)),
+      tw: Math.max(8, c.width - pad - frame - x0),
+      cw: (span) => Math.max(1, Math.ceil(((Math.max(8, c.width - pad - frame - x0)) * k.bin) / span)),
     };
   };
   /** Bay `b`'s rectangle of the trace (0 the hero, then one per lane) over the trace's x fraction
@@ -497,13 +499,18 @@ await probe(async ({ browser, open }) => {
   const chips = () => page.evaluate(() => [...document.querySelectorAll('.sv-chip')].map((el) => {
     const cs = getComputedStyle(el);
     const box = el.getBoundingClientRect();
+    const num = el.querySelector('.sv-chip__num');
+    const lamp = el.querySelector('.sv-chip__lamp');
+    const ls = lamp && getComputedStyle(lamp);
     return {
       state: el.dataset.state,
       muted: el.dataset.muted === 'true',
       label: el.getAttribute('aria-label'),
       current: el.getAttribute('aria-current') === 'true',
-      color: cs.color,
+      color: num ? getComputedStyle(num).color : null,
       face: cs.backgroundColor,
+      /** The D14 rec lamp: shown (displayed with a box) and its colour. */
+      lamp: ls ? { shown: ls.display !== 'none' && lamp.getBoundingClientRect().width > 0, color: ls.backgroundColor } : null,
       animation: cs.animationName,
       box: [box.x, box.y, box.width, box.height].map(Math.round).join(','),
     };
@@ -610,7 +617,7 @@ await probe(async ({ browser, open }) => {
       if (b.left < 0 || b.top < 0 || b.right > innerWidth || b.bottom > innerHeight) problems.push(`${name} leaves the window`);
       for (const [other, o] of boxes) if (name < other && b.left < o.right && o.left < b.right && b.top < o.bottom && o.top < b.bottom) problems.push(`${name} overlaps ${other}`);
     }
-    const chip = getComputedStyle(document.querySelector('.sv-chip'));
+    const chip = getComputedStyle(document.querySelector('.sv-chip__num'));
     const ctx = document.createElement('canvas').getContext('2d');
     ctx.font = `${chip.fontWeight} ${chip.fontSize} ${chip.fontFamily}`;
     return { problems, capPx: Math.round(ctx.measureText('5').actualBoundingBoxAscent * 10) / 10, boxes: Object.fromEntries(boxes.map(([n, b]) => [n, [b.x, b.y, b.width, b.height].map(Math.round).join(',')])) };
@@ -742,6 +749,11 @@ await probe(async ({ browser, open }) => {
           assert.equal(got[i].face, tokens.engaged, `${scene}: the selected chip has the warm face`);
           assert.equal(got[i].color, tokens.bg, `${scene}: the selected chip's number is dark`);
         } else assert.equal(got[i].color, tokens[token], `${scene}: chip ${i + 1}'s number is ${token}`);
+        // D14: REC and OVERDUB told from PLAYING without colour, by the round lamp beside the bar.
+        if (state === 'rec' || state === 'dub') {
+          assert.equal(got[i].lamp?.shown, true, `${scene}: chip ${i + 1} (${state}) shows the rec lamp`);
+          assert.equal(got[i].lamp.color, tokens[state], `${scene}: chip ${i + 1}'s rec lamp is lit ${state}`);
+        } else if (state === 'play' || state === 'empty') assert.equal(got[i].lamp?.shown, false, `${scene}: chip ${i + 1} (${state}) shows no rec lamp`);
       }
       assert.deepEqual(got.map((c) => c.current), got.map((_, i) => i === selected), `${scene}: aria-current follows the selection`);
       return got;
