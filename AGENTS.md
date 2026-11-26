@@ -86,7 +86,7 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 - **Tracked files are impersonal:** roles ("the owner"), never a person's name,
   verbatim speech or an email address. Two exceptions name a GitHub handle: `README.md` § Thanks
   credits a contributor, and `LICENSE` and `src-tauri/Cargo.toml` `authors` name the owner as
-  copyright holder.
+  copyright holder. `README.md` may also link to the owner's own site, whose address carries the name.
 - **Keep this file a router:** a landed feature becomes at most a one-line pointer here.
 
 ## Commands: what `package.json` does not say
