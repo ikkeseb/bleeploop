@@ -12,10 +12,18 @@ cache=${XDG_CACHE_HOME:-$HOME/.cache}/tauri
 tools=$(mktemp -d /tmp/bleeploop-linuxdeploy-XXXXXX)
 trap 'rm -rf "$tools"' EXIT
 cd "$root"
-# The first run downloads linuxdeploy into Tauri's cache; its bundle step is expected to fail on Arch.
-NO_STRIP=true APPIMAGE_EXTRACT_AND_RUN=1 pnpm tauri build --bundles appimage || true
+# The first run downloads linuxdeploy into Tauri's cache. Only its own linuxdeploy step may fail (it
+# does on Arch); any earlier failure ends the script, and the AppDir must be this build's.
+touch "$tools/started"
+status=0
+NO_STRIP=true APPIMAGE_EXTRACT_AND_RUN=1 pnpm tauri build --bundles appimage >"$tools/tauri.log" 2>&1 || status=$?
+tail -n 5 "$tools/tauri.log"
+if [ "$status" -ne 0 ] && ! grep -q 'failed to run.*linuxdeploy' "$tools/tauri.log"; then
+  echo "tauri build failed before its bundle step (exit $status)" >&2
+  exit 1
+fi
 appdir=src-tauri/target/release/bundle/appimage/BleepLoop.AppDir
-[ -x "$appdir/usr/bin/app" ] || { echo "tauri build left no AppDir at $appdir" >&2; exit 1; }
+[ -x "$appdir/usr/bin/app" ] && [ "$appdir/usr/bin/app" -nt "$tools/started" ] || { echo "tauri build left no fresh AppDir at $appdir" >&2; exit 1; }
 cp "$cache/linuxdeploy-x86_64.AppImage" "$cache/linuxdeploy-plugin-appimage.AppImage" "$cache/linuxdeploy-plugin-gtk.sh" "$tools/"
 sed -i 's|^copy_lib_tree "$gdk_pixbuf_binarydir" "$APPDIR/"$|if [ -d "$gdk_pixbuf_binarydir" ]; then copy_lib_tree "$gdk_pixbuf_binarydir" "$APPDIR/"; else mkdir -p "$(dirname "$APPDIR/${gdk_pixbuf_cache_file/$LD_GTK_LIBRARY_PATH//usr/lib}")"; fi|' "$tools/linuxdeploy-plugin-gtk.sh"
 grep -q 'if \[ -d "$gdk_pixbuf_binarydir" \]' "$tools/linuxdeploy-plugin-gtk.sh" || { echo "the GTK plugin changed: its gdk-pixbuf step was not patched" >&2; exit 1; }

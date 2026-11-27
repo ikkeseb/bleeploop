@@ -10,14 +10,15 @@
 //! the engine services the ports at each block start; while none does, the host services them at once
 //! on the idle engine. A load waits for a device: the unit is activated at the engine's rate.
 //!
-//! Lock order: `Core::run` before `Core::ports`; `SlotHost` takes `ports` alone and `run` alone.
+//! Lock order (`mod.rs`): `run` → `settings` → `ports` → `ends`; `SlotHost` never holds `ports` while it
+//! takes `run`.
 
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use lf_engine::{Command, Engine, SlotPort, TimedCommand, UnitId, UnitProcessor, SLOT_COUNT};
+use lf_engine::{Command, Engine, Left, SeatRefusal, SlotPort, TimedCommand, UnitId, UnitProcessor, SLOT_COUNT};
 use tauri::Emitter;
 
 use super::{lock, Core, EngineHost};
@@ -46,14 +47,22 @@ const UNLOAD_WAIT: Duration = Duration::from_secs(6);
 const LIVE_OFF_WAIT: Duration = Duration::from_secs(1);
 const EXIT_SAVE_WAIT: Duration = Duration::from_secs(2);
 
+/// One unit the engine handed back, for its owner: why it left when that was a refusal.
+struct Mail {
+    token: u64,
+    unit: Unit,
+    refused: Option<SeatRefusal>,
+}
+
 /// The engine's slot ports and who holds what in them.
 #[derive(Default)]
 pub(super) struct SlotPorts {
     ports: Option<[SlotPort; SLOT_COUNT]>,
-    /// Per slot, the owner (its token) and the unit id it has in the engine.
+    /// Per slot, the owner (its token) and the unit id it has in the engine. An abandoned owner's
+    /// stays until its unit comes back, so no other load takes the slot while the engine holds it.
     seated: [Option<(u64, UnitId)>; SLOT_COUNT],
-    /// Units the engine handed back, by owner token, for the owner to take.
-    mailbox: VecDeque<(u64, Unit)>,
+    /// Units the engine handed back, for their owners to take.
+    mailbox: VecDeque<Mail>,
     /// Owners that gave up on their unit: whatever comes back for them leaks.
     abandoned: Vec<u64>,
     next_id: UnitId,
@@ -71,7 +80,13 @@ impl SlotPorts {
                     self.seated[slot] = None;
                 }
                 match owner {
-                    Some(token) if !self.abandoned.contains(&token) => self.mailbox.push_back((token, back.unit)),
+                    Some(token) if !self.abandoned.contains(&token) => {
+                        let refused = match back.left {
+                            Left::Refused(why) => Some(why),
+                            _ => None,
+                        };
+                        self.mailbox.push_back(Mail { token, unit: back.unit, refused });
+                    }
                     // Abandoned, or no owner known: the unit may still be inside its plugin's code.
                     _ => std::mem::forget(back.unit),
                 }
@@ -79,36 +94,43 @@ impl SlotPorts {
         }
     }
 
-    fn take_mail(&mut self, token: u64) -> Option<Unit> {
-        let at = self.mailbox.iter().position(|(t, _)| *t == token)?;
-        self.mailbox.remove(at).map(|(_, unit)| unit)
+    fn take_mail(&mut self, token: u64) -> Option<Mail> {
+        let at = self.mailbox.iter().position(|m| m.token == token)?;
+        self.mailbox.remove(at)
+    }
+
+    /// A new engine's ports (`None`: no engine), after evicting every unit from the one it replaces
+    /// into its owner's mailbox. An engine that panics while evicting is leaked with its units.
+    pub(super) fn replace(&mut self, old: Option<Box<Engine>>, new: Option<[SlotPort; SLOT_COUNT]>) {
+        if let Some(mut engine) = old {
+            let evicted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                for _ in 0..8 {
+                    engine.evict_slots();
+                    self.reap();
+                }
+            }));
+            if evicted.is_err() || self.seated.iter().any(Option::is_some) {
+                log::error!("[plugin_host] an engine kept a plugin unit on replacement: leaked with it");
+                std::mem::forget(engine);
+            }
+        } else {
+            self.reap();
+        }
+        self.seated = Default::default();
+        self.ports = new;
     }
 }
 
-/// A new engine replaces `old` (another sample rate, or a fault): evict every unit from the old one
-/// into its owner's mailbox (the owners re-activate them at the new rate), then take the new engine's
-/// ports. Called with `Core::run` held. An engine that panics while evicting is leaked with its units.
+/// The ports' lock: taken before `Core::ends` wherever both are held (a rebuild publishes the new
+/// rate and the new ports under it), after `Core::run`.
+pub(super) fn ports(core: &Core) -> MutexGuard<'_, SlotPorts> {
+    lock(&core.ports)
+}
+
+/// A new engine replaces `old` (another sample rate, or a fault): its units go back to their owners,
+/// who re-activate them at the new engine's rate once it exists. Called with `Core::run` held.
 pub(super) fn replace_ports(core: &Core, old: Option<Box<Engine>>, new: Option<[SlotPort; SLOT_COUNT]>) {
-    let mut ports = lock(&core.ports);
-    if let Some(mut engine) = old {
-        let evicted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            for _ in 0..8 {
-                engine.evict_slots();
-                ports.reap();
-            }
-        }));
-        if evicted.is_err() || ports.seated.iter().any(Option::is_some) {
-            log::error!("[plugin_host] an engine kept a plugin unit on replacement: leaked with it");
-            ports.seated = Default::default();
-            std::mem::forget(engine);
-        }
-    } else {
-        ports.reap();
-    }
-    if new.is_some() || ports.ports.is_some() {
-        ports.seated = Default::default();
-        ports.ports = new;
-    }
+    ports(core).replace(old, new);
 }
 
 /// One slot's handshake with the engine. Cheap to clone; one plugin owner uses a slot at a time.
@@ -122,7 +144,7 @@ pub struct SlotHost {
 impl SlotHost {
     pub(super) fn new(core: Arc<Core>, slot: usize) -> SlotHost {
         let token = {
-            let mut ports = lock(&core.ports);
+            let mut ports = ports(&core);
             ports.next_token += 1;
             ports.next_token
         };
@@ -142,14 +164,25 @@ impl SlotHost {
         MAX_BLOCK
     }
 
-    /// While no device runs, apply the ports' messages on the idle engine at once.
+    /// While no device runs, apply the ports' messages on the idle engine at once. An engine that
+    /// panics there is faulted as a callback's would be: its units go back to their owners.
     fn service_if_idle(&self) {
         let mut run = lock(&self.core.run);
-        if run.device.is_none() {
-            if let Some(engine) = run.idle.as_mut() {
-                engine.service_slots_idle();
-            }
+        if run.device.is_some() {
+            return;
         }
+        let Some(engine) = run.idle.as_mut() else { return };
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.service_slots_idle())).is_ok() {
+            return;
+        }
+        log::error!("[plugin_host] the idle engine panicked while it serviced its slots");
+        let engine = run.idle.take();
+        run.events.push(super::DeviceEvent::EngineFaulted);
+        run.frame = 0;
+        let mut ports = ports(&self.core);
+        *lock(&self.core.ends) = None;
+        self.core.engine_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
+        ports.replace(engine, None);
     }
 
     /// Hand a unit activated at `rate` to the engine. A unit for an engine a rebuild has since
@@ -158,7 +191,7 @@ impl SlotHost {
     /// refused it.
     pub fn install(&self, unit: Unit, rate: u32) -> Result<(), (Unit, String)> {
         let (id, ticket) = {
-            let mut ports = lock(&self.core.ports);
+            let mut ports = ports(&self.core);
             ports.reap();
             if ports.ports.is_none() {
                 return Err((unit, "no audio device is open".to_string()));
@@ -166,8 +199,9 @@ impl SlotHost {
             if ports.seated[self.slot].is_some() {
                 return Err((unit, format!("slot {} already holds a unit", self.slot)));
             }
+            // Under the ports' lock: a rebuild publishes its rate and its ports under it.
             if self.core.rate() != Some(rate) {
-                ports.mailbox.push_back((self.token, unit));
+                ports.mailbox.push_back(Mail { token: self.token, unit, refused: None });
                 return Ok(());
             }
             ports.next_id += 1;
@@ -184,17 +218,18 @@ impl SlotHost {
         loop {
             self.service_if_idle();
             {
-                let mut ports = lock(&self.core.ports);
-                let refused = ports.ports.as_mut().and_then(|p| p[self.slot].refused(id));
-                if let Some((unit, why)) = refused {
-                    ports.seated[self.slot] = None;
-                    return Err((unit, format!("the engine refused slot {}'s unit: {why:?}", self.slot)));
+                let mut ports = ports(&self.core);
+                // The answer first: the engine hands a refused unit back before it answers.
+                let answered = ticket.answered();
+                ports.reap();
+                let refused = ports.mailbox.iter().position(|m| m.token == self.token && m.refused.is_some());
+                if let Some(at) = refused {
+                    let mail = ports.mailbox.remove(at).expect("found above");
+                    let why = mail.refused.expect("found above");
+                    return Err((mail.unit, format!("the engine refused slot {}'s unit: {why:?}", self.slot)));
                 }
-                if ports.seated[self.slot] == Some((self.token, id)) && ticket.answered() {
-                    return Ok(());
-                }
-                if ports.seated[self.slot] != Some((self.token, id)) {
-                    // A rebuild evicted it already: it waits in the mailbox.
+                if answered || ports.seated[self.slot] != Some((self.token, id)) {
+                    // Applied, held for a take (it applies after), or evicted by a rebuild already.
                     return Ok(());
                 }
             }
@@ -208,13 +243,14 @@ impl SlotHost {
 
     /// Take the slot's unit back: the engine releases its notes, crossfades it out and stops it.
     /// `Ok(None)` when the slot holds none of this owner's; `Err` when it does not come back within
-    /// `timeout` (it stays the engine's; a later `remove` or `take_evicted` can still recover it).
+    /// `timeout` (it stays the engine's; a later `remove` or `take_evicted` can still recover it). A
+    /// removal the engine holds for a take waits for the take to end.
     pub fn remove(&self, timeout: Duration) -> Result<Option<Unit>, String> {
         {
-            let mut ports = lock(&self.core.ports);
+            let mut ports = ports(&self.core);
             ports.reap();
-            if let Some(unit) = ports.take_mail(self.token) {
-                return Ok(Some(unit));
+            if let Some(mail) = ports.take_mail(self.token) {
+                return Ok(Some(mail.unit));
             }
             let Some((token, id)) = ports.seated[self.slot] else { return Ok(None) };
             if token != self.token {
@@ -225,14 +261,17 @@ impl SlotHost {
                 return Err(format!("slot {}'s port is full", self.slot));
             }
         }
-        let deadline = Instant::now() + timeout.max(Duration::from_millis(500));
+        let mut deadline = Instant::now() + timeout.max(Duration::from_millis(500));
         loop {
             self.service_if_idle();
             {
-                let mut ports = lock(&self.core.ports);
+                let mut ports = ports(&self.core);
                 ports.reap();
-                if let Some(unit) = ports.take_mail(self.token) {
-                    return Ok(Some(unit));
+                if let Some(mail) = ports.take_mail(self.token) {
+                    return Ok(Some(mail.unit));
+                }
+                if ports.ports.as_ref().is_some_and(|p| p[self.slot].holding()) {
+                    deadline = Instant::now() + timeout;
                 }
             }
             if Instant::now() >= deadline {
@@ -243,23 +282,25 @@ impl SlotHost {
     }
 
     /// This owner's unit, if the engine handed it back unasked (a rebuild at another rate, a late
-    /// refusal): re-activate it at `rate` and install it again. The owner polls this every turn.
+    /// refusal): re-activate it at `rate` and install it again. The owner polls this every turn. While
+    /// no engine exists (after a fault) the unit waits here for the next one, so it is not activated
+    /// for no engine and parked.
     pub fn take_evicted(&self) -> Option<Unit> {
-        let mut ports = lock(&self.core.ports);
+        let mut ports = ports(&self.core);
         ports.reap();
-        ports.take_mail(self.token)
+        if ports.ports.is_none() || self.core.rate().is_none() {
+            return None;
+        }
+        ports.take_mail(self.token).map(|mail| mail.unit)
     }
 
     /// Give up on this owner's unit (a `remove` timed out and the owner leaks its plugin): whenever it
-    /// comes back it leaks too, and the slot frees.
+    /// comes back it leaks too. The slot stays taken until it does.
     pub fn abandon(&self) {
-        let mut ports = lock(&self.core.ports);
+        let mut ports = ports(&self.core);
         ports.abandoned.push(self.token);
-        if ports.seated[self.slot].is_some_and(|(token, _)| token == self.token) {
-            ports.seated[self.slot] = None;
-        }
-        while let Some(unit) = ports.take_mail(self.token) {
-            std::mem::forget(unit);
+        while let Some(mail) = ports.take_mail(self.token) {
+            std::mem::forget(mail.unit);
         }
     }
 }
@@ -411,7 +452,14 @@ impl Slots {
     pub(crate) fn unload(&self, slot: u8, document: Option<(&PluginHostState, u32)>, silence: bool) -> Result<(), String> {
         if silence {
             let host = &self.host;
-            let loaded = matches!(self.lock()[usize::from(slot)], EngineSlot::Loaded { .. });
+            // A replaced document's unload must not take the new one's slot off live.
+            let loaded = {
+                let slots = self.lock();
+                if let Some((state, epoch)) = document {
+                    current_document(state, epoch)?;
+                }
+                matches!(slots[usize::from(slot)], EngineSlot::Loaded { .. })
+            };
             if loaded {
                 host.silence_slot(slot, LIVE_OFF_WAIT)
                     .map_err(|e| format!("the plugin in slot {slot} stays loaded, as its live input could not be stopped first: {e}"))?;
@@ -553,26 +601,49 @@ fn unload_handle(slot: u8, mut handle: Arc<EngineSlotHandle>) -> Result<(), Stri
 
 impl EngineHost {
     /// Take `slot` off live and wait (≤ `timeout`) for the engine's gate on it to close, so a plugin
-    /// that leaves does not hand the dry input to the monitor and the record path.
+    /// that leaves does not hand the dry input to the monitor and the record path (the Windows
+    /// host's `EngineHost::silence_slot`). While a device runs, a block the engine rendered after
+    /// taking the live-off answers it; with none, the idle engine shuts the gate at once until the
+    /// live-off applies; while a route is in transit (neither), it waits for one of the two; with no
+    /// engine at all, the next one replays the live-off before its first block.
     pub(super) fn silence_slot(&self, slot: u8, timeout: Duration) -> Result<(), String> {
         self.send(TimedCommand { frame: None, command: Command::SetSlotLive(slot, false) })
             .map_err(|()| "the engine's command ring is full".to_string())?;
-        let taken = lock(&self.core.ends).as_ref().map(|e| e.pushed);
+        // The engine and the ring's count the answer must reach, read together: a rebuild since the
+        // send replayed the live-off within its own count.
+        let mut target = {
+            let ends = lock(&self.core.ends);
+            match ends.as_ref() {
+                Some(e) => (self.core.engine_gen.load(Acquire), e.pushed),
+                None => return Ok(()),
+            }
+        };
         let deadline = Instant::now() + timeout;
         loop {
             {
                 let mut run = lock(&self.core.run);
                 if run.device.is_none() {
-                    if let (Some(engine), Some(taken)) = (run.idle.as_mut(), taken) {
+                    if let Some(engine) = run.idle.as_mut() {
+                        let ends = lock(&self.core.ends);
+                        let gen = self.core.engine_gen.load(Acquire);
+                        let Some(e) = ends.as_ref() else { return Ok(()) };
+                        let taken = if gen == target.0 { target.1 } else { e.pushed };
                         engine.close_slot_idle(usize::from(slot), taken);
+                        return Ok(());
                     }
-                    return Ok(());
                 }
             }
-            match (lock(&self.core.ends).as_ref(), taken) {
-                (Some(ends), Some(taken)) if ends.overview.slot_gate_closed(usize::from(slot), taken) => return Ok(()),
-                (None, _) | (_, None) => return Ok(()),
-                _ => {}
+            let running = lock(&self.core.run).device.is_some();
+            {
+                let ends = lock(&self.core.ends);
+                let Some(e) = ends.as_ref() else { return Ok(()) };
+                let gen = self.core.engine_gen.load(Acquire);
+                if gen != target.0 {
+                    target = (gen, e.pushed);
+                }
+                if running && e.overview.slot_gate_closed(usize::from(slot), target.1) {
+                    return Ok(());
+                }
             }
             if Instant::now() >= deadline {
                 return Err(format!("slot {slot}'s live input did not close within {} ms", timeout.as_millis()));
@@ -718,6 +789,58 @@ mod tests {
         }
         unloading.join().unwrap().expect("the second unload");
         let _ = std::fs::remove_dir_all(&tones);
+    }
+
+    /// A stand-in unit: passes its input on, with a latency of its own choosing.
+    struct Stub(lf_engine::grid::Frame);
+    impl UnitProcessor for Stub {
+        fn info(&self) -> lf_engine::UnitInfo {
+            lf_engine::UnitInfo { kind: lf_engine::UnitKind::Plugin, source: false, latency: self.0 }
+        }
+        fn process(&mut self, _cx: &lf_engine::UnitCx, input: [&[f32]; 2], _e: &[lf_engine::SlotEvent], out: [&mut [f32]; 2]) {
+            let [l, r] = out;
+            l.copy_from_slice(input[0]);
+            r.copy_from_slice(input[1]);
+        }
+        fn stop(&mut self) {}
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    /// A unit the engine refuses (its latency past the chain's bound) comes back to the load as an
+    /// error with the unit, and the slot stays free for the next.
+    #[test]
+    fn a_refused_install_answers_an_error_and_leaves_the_slot_free() {
+        let rig = Rig::new(RATE);
+        let slot = SlotHost::new(rig.host.core.clone(), 0);
+        let too_late = lf_engine::max_chain_latency(RATE) + 1;
+        let Err((unit, why)) = slot.install(Box::new(Stub(too_late)), RATE) else { panic!("the engine took it") };
+        assert!(why.contains("refused") && why.contains("Latency"), "{why}");
+        assert_eq!(unit.info().latency, too_late, "the unit comes back to its owner");
+        assert!(slot.install(Box::new(Stub(0)), RATE).is_ok(), "the slot is free for the next load");
+        assert!(matches!(slot.remove(Duration::from_secs(2)), Ok(Some(_))), "comes back");
+    }
+
+    /// After a fault leaves no engine, an owner's unit waits instead of being activated for none;
+    /// the next engine gets it back for its owner to re-activate there.
+    #[test]
+    fn a_unit_waits_out_a_fault_for_the_next_engine() {
+        let rig = Rig::new(RATE);
+        let slot = SlotHost::new(rig.host.core.clone(), 0);
+        assert!(slot.install(Box::new(Stub(0)), RATE).is_ok(), "installed");
+        {
+            let mut run = lock(&rig.host.core.run);
+            *lock(&rig.host.core.ends) = None;
+            let engine = run.idle.take();
+            replace_ports(&rig.host.core, engine, None);
+        }
+        assert!(slot.take_evicted().is_none(), "no engine: the unit waits");
+        assert!(slot.install(Box::new(Stub(0)), RATE).is_err(), "no engine takes a unit");
+        rig.engine_at(44_100);
+        let back = slot.take_evicted().expect("the next engine hands it back");
+        assert!(slot.install(back, 44_100).is_ok(), "re-installed in the new engine");
+        assert!(matches!(slot.remove(Duration::from_secs(2)), Ok(Some(_))), "comes back");
     }
 
     #[test]

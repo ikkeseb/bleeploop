@@ -126,20 +126,62 @@ impl KillOnCloseJob {
 
 /// Drain a pipe to EOF so the child never blocks on a full pipe, while retaining at most `cap`
 /// bytes in the parent process.
-fn drain_capped(mut reader: impl Read, cap: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(cap.min(8192));
+#[cfg(all(test, windows))]
+fn drain_capped(reader: impl Read, cap: usize) -> Vec<u8> {
+    let out = std::sync::Mutex::new(Vec::with_capacity(cap.min(8192)));
+    drain_into(reader, cap, &out);
+    out.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `drain_capped` into a buffer the caller can read before EOF (`collect_reader`).
+fn drain_into(mut reader: impl Read, cap: usize, out: &std::sync::Mutex<Vec<u8>>) {
     let mut chunk = [0u8; 8192];
     loop {
         match reader.read(&mut chunk) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
+                let mut out = out.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let keep = cap.saturating_sub(out.len()).min(n);
                 out.extend_from_slice(&chunk[..keep]);
             }
         }
     }
-    out
 }
+
+/// A pipe reader thread and the bytes it has read so far.
+type Reader = (std::thread::JoinHandle<()>, std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+fn spawn_reader(pipe: impl Read + Send + 'static, cap: usize) -> Reader {
+    let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(cap.min(8192))));
+    let buf = out.clone();
+    (std::thread::spawn(move || drain_into(pipe, cap, &buf)), out)
+}
+
+/// What a reader read, once it reached EOF. Windows: the Job's close ends every holder of the pipe,
+/// so EOF comes. Linux: a process that left the scan child's group (Wine's server, under yabridge)
+/// can hold the pipe open, so the reader gets `READER_GRACE` and is then left to EOF on its own,
+/// with what it read by then.
+fn collect_reader(reader: Option<Reader>) -> Vec<u8> {
+    let Some((handle, out)) = reader else { return Vec::new() };
+    #[cfg(not(windows))]
+    {
+        let deadline = Instant::now() + READER_GRACE;
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !handle.is_finished() {
+            log::warn!("[scan] a process outside the scan child still holds its output; read what came");
+            return out.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        }
+    }
+    let _ = handle.join();
+    let bytes = std::mem::take(&mut *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    bytes
+}
+
+/// How long a Linux scan waits for its pipes' EOF after the child's group is gone.
+#[cfg(not(windows))]
+const READER_GRACE: Duration = Duration::from_secs(2);
 
 /// Why one bundle produced no descriptors. `Bundle` is the plugin's own doing (crash, non-zero
 /// exit, timeout, unparsable output) and is cached under its fingerprint so it is not retried every
@@ -1927,14 +1969,8 @@ fn run_gated_child(
     // AFTER exit, a chatty plugin's write() blocks on a full pipe, the child never exits, and we
     // stall to the 20s timeout and wrongly mark a good plugin failed. Readers can't deadlock —
     // they read continuously — so the child always makes progress. (Bug-hunt 2026-06-21.)
-    let stdout_reader = child
-        .stdout
-        .take()
-        .map(|so| std::thread::spawn(move || drain_capped(so, SCAN_STDOUT_CAP)));
-    let stderr_reader = child
-        .stderr
-        .take()
-        .map(|se| std::thread::spawn(move || drain_capped(se, SCAN_STDERR_CAP)));
+    let stdout_reader = child.stdout.take().map(|so| spawn_reader(so, SCAN_STDOUT_CAP));
+    let stderr_reader = child.stderr.take().map(|se| spawn_reader(se, SCAN_STDERR_CAP));
     let deadline = Instant::now() + timeout;
     // The loop only decides the exit OUTCOME; the reader threads above are joined once after it,
     // so the child handles are never moved inside the loop body.
@@ -1960,8 +1996,8 @@ fn run_gated_child(
         let _ = child.kill();
         let _ = child.wait();
     }
-    let out = stdout_reader.and_then(|h| h.join().ok()).unwrap_or_default();
-    let err_bytes = stderr_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+    let out = collect_reader(stdout_reader);
+    let err_bytes = collect_reader(stderr_reader);
     let err = String::from_utf8_lossy(&err_bytes);
     match outcome {
         Ok(status) if status.success() => Ok(out),

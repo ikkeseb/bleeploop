@@ -73,9 +73,21 @@ pub(crate) fn shutdown(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<App>() {
         state.host.core.exiting.store(true, Release);
         state.feed.stop();
-        // While the device still plays: each plugin's tone is kept, then it leaves the engine.
-        state.plugins.save_tones_on_exit();
-        state.plugins.unload_all();
+        // While the device still plays: each plugin's tone is kept, then it leaves the engine, on a
+        // thread of its own and within the Windows app's bound (`engine_io::mode::SHUTDOWN_WAIT`): a
+        // plugin stuck in its release is left to the process exit, its unit still in the engine.
+        let plugins = state.plugins.clone();
+        let (done, waited) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("lf-plugins-shutdown".into()).spawn(move || {
+            plugins.save_tones_on_exit();
+            plugins.unload_all();
+            let _ = done.send(());
+        });
+        match spawned.map(|_| waited.recv_timeout(std::time::Duration::from_secs(8))) {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => log::error!("[plugin_host] the plugins did not unload within 8 s; exiting anyway"),
+            Err(e) => log::error!("[plugin_host] could not start the plugins' shutdown: {e}"),
+        }
         state.host.close();
     }
 }
@@ -91,7 +103,8 @@ struct EngineHost {
 
 // Only open, close, fault teardown and channel changes take device_op. The controls and feed
 // keep reading the previous device while a silent candidate negotiates with JACK. Lock order
-// in a transition is device_op → session_busy (only across a rate change) → run → settings → ends.
+// in a transition is device_op → session_busy (only across a rate change) → run → settings → ports
+// (`plugins::ports`) → ends.
 // No audio callback takes these locks.
 #[derive(Default)]
 struct Core {
@@ -316,6 +329,9 @@ impl EngineHost {
             // start only validates the ready route and submits the engine; every graph wait
             // and the old client's close completed before this short handoff.
             let device = route.start(Box::new(engine), 0).map_err(|(why, _)| why)?;
+            // The new rate and the new slot ports are published together (`plugins::ports`): a
+            // plugin owner reads both under the ports' lock.
+            let mut slot_ports = plugins::ports(&self.core);
             let mut existing = lock(&self.core.ends);
             let gen = self.core.engine_gen.fetch_add(1, Release) + 1;
             settings.follow(gen);
@@ -329,7 +345,8 @@ impl EngineHost {
             run.frame = 0;
             run.input.rebuilt(self);
             // The plugin units leave the replaced engine for their owners, who re-activate them here.
-            plugins::replace_ports(&self.core, old_engine, Some(ports));
+            slot_ports.replace(old_engine, Some(ports));
+            drop(slot_ports);
             drop(run);
             device
         };
