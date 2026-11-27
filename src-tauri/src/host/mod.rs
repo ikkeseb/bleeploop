@@ -22,21 +22,31 @@
 //! `vst2.rs` (the VST2 binary interface, module loader and host callback) and `pe.rs` (which `.dll` is a VST2 plugin, read
 //! from its headers).
 
-#[cfg(windows)]
+// Linux builds the Windows host's CLAP and VST3 half without VST2, chains or the editor window: the
+// items only those reach are dead there, and the Windows build keeps linting them.
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_imports))]
+
+// The CLAP and VST3 hosts run on Windows and Linux (clack and the `vst3` crate are portable); VST2,
+// its PE pre-filter and the Win32 editor window are Windows-only. Linux keeps the editor window's
+// names in a stand-in (`editor_window_linux.rs`).
+#[cfg(any(windows, target_os = "linux"))]
 mod clap;
 mod commands;
 #[cfg(windows)]
 mod editor_window;
-#[cfg(windows)]
+#[cfg(target_os = "linux")]
+#[path = "editor_window_linux.rs"]
+mod editor_window;
+#[cfg(any(windows, target_os = "linux"))]
 mod folders;
 #[cfg(windows)]
 mod pe;
 #[cfg(debug_assertions)]
 pub(crate) mod rt_alloc;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod scan;
 mod state;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub(crate) mod tone;
 #[cfg(windows)]
 mod vst2;
@@ -52,9 +62,9 @@ pub(crate) use state::{ParamDesc, PluginDescriptor, PluginInfo, ToneImport};
 pub(crate) use clap::engine_spike_run;
 #[cfg(all(windows, debug_assertions))]
 pub(crate) use scan::scan_one;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub(crate) use scan::scan_paths;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[allow(unused_imports)] // the native engine's plugin slots (the `plugin_*` commands)
 pub(crate) use clap::engine_slot;
 #[cfg(windows)]

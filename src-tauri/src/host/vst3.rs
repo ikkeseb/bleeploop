@@ -1,3 +1,5 @@
+// The Windows-only fixtures reach `sum_to_mono` and `Instant` through `super::*`.
+#[cfg_attr(not(windows), allow(unused_imports))]
 use super::{
     checked_plugin_channels, checked_plugin_params, pair_from, pair_into, sum_to_mono, ParamEvent, MAX_EVENTS_PER_BLOCK,
 };
@@ -10,6 +12,7 @@ use super::super::state::ParamDesc;
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
+#[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::rc::Rc;
 use std::sync::atomic::{
@@ -17,6 +20,7 @@ use std::sync::atomic::{
     Ordering::{Acquire, Relaxed, Release},
 };
 use std::sync::{Arc, Mutex};
+#[cfg_attr(not(windows), allow(unused_imports))]
 use std::time::Instant;
 
 use lf_engine::SlotEventKind;
@@ -43,9 +47,14 @@ use vst3::Steinberg::{
 };
 use vst3::{Class, ComPtr, ComRef, ComWrapper};
 
+#[cfg(windows)]
 use windows::core::{s, PCWSTR};
+#[cfg(windows)]
 use windows::Win32::Foundation::{FreeLibrary, HMODULE, HWND};
+#[cfg(windows)]
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+#[cfg(target_os = "linux")]
+use super::super::editor_window::HWND;
 
 // ── host-implemented COM objects (the callbacks the plugin holds) ──────────────────────────
 
@@ -408,10 +417,11 @@ impl IBStreamTrait for MemStream {
         kResultOk
     }
     unsafe fn seek(&self, pos: int64, mode: int32, result: *mut int64) -> tresult {
+        // The seek modes' constant type differs between the platforms' bindings: compare as `int32`.
         let base = match mode {
-            IStreamSeekMode_::kIBSeekSet => 0,
-            IStreamSeekMode_::kIBSeekCur => self.pos.get() as int64,
-            IStreamSeekMode_::kIBSeekEnd => self.bytes.borrow().len() as int64,
+            m if m == IStreamSeekMode_::kIBSeekSet as int32 => 0,
+            m if m == IStreamSeekMode_::kIBSeekCur as int32 => self.pos.get() as int64,
+            m if m == IStreamSeekMode_::kIBSeekEnd as int32 => self.bytes.borrow().len() as int64,
             _ => return kInvalidArgument,
         };
         let limit = super::super::tone::MAX_STATE_BYTES as int64;
@@ -806,6 +816,7 @@ fn note_to_vst3(kind: SlotEventKind, offset: i32) -> Option<Event> {
     Some(e)
 }
 
+#[cfg(windows)]
 type Vst3ModuleEntry = unsafe extern "system" fn() -> bool;
 
 /// Held across every `Vst3Module` load (LoadLibrary + InitDll) and drop (ExitDll + FreeLibrary):
@@ -818,6 +829,7 @@ fn module_lock() -> std::sync::MutexGuard<'static, ()> {
     MODULE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[cfg(windows)]
 /// Owns one loaded VST3 DLL. Successful `InitDll` is paired with `ExitDll`, and the module stays
 /// mapped until every vtbl-bearing COM object has been released (`vst3_engine`'s `Vst3::release`).
 struct Vst3Module {
@@ -826,6 +838,7 @@ struct Vst3Module {
     init_succeeded: bool,
 }
 
+#[cfg(windows)]
 impl Vst3Module {
     fn load(path: PCWSTR) -> Result<Self, String> {
         let serial = module_lock();
@@ -856,6 +869,7 @@ impl Vst3Module {
     }
 }
 
+#[cfg(windows)]
 impl Drop for Vst3Module {
     fn drop(&mut self) {
         let _serial = module_lock();
@@ -869,6 +883,71 @@ impl Drop for Vst3Module {
             }
             let _ = FreeLibrary(self.handle);
         }
+    }
+}
+
+/// Owns one loaded VST3 shared object (Linux: `ModuleEntry(handle)` / `ModuleExit()`, the
+/// Steinberg module entries a Linux binary exports, under the same `MODULE_LOCK`). A successful
+/// `ModuleEntry` is paired with `ModuleExit`, and the library stays mapped until every vtbl-bearing
+/// COM object has been released (`vst3_engine`'s `Vst3::release`).
+#[cfg(target_os = "linux")]
+pub(super) struct Vst3Module {
+    lib: Option<libloading::os::unix::Library>,
+    exit: Option<unsafe extern "C" fn() -> bool>,
+    init_succeeded: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl Vst3Module {
+    pub(super) fn load(path: &std::path::Path) -> Result<Self, String> {
+        use libloading::os::unix::{Library, RTLD_LAZY, RTLD_LOCAL};
+        let serial = module_lock();
+        // SAFETY: loading the vetted plugin binary and resolving its standard VST3 module entries.
+        // The guard owns the library at once, so every later error unloads it.
+        unsafe {
+            let lib = Library::open(Some(path), RTLD_LAZY | RTLD_LOCAL).map_err(|e| format!("dlopen: {e}"))?;
+            let exit = lib.get::<unsafe extern "C" fn() -> bool>(b"ModuleExit\0").ok().map(|f| *f);
+            let entry = lib.get::<unsafe extern "C" fn(*mut c_void) -> bool>(b"ModuleEntry\0").ok().map(|f| *f);
+            let raw = lib.into_raw();
+            let mut module = Self { lib: Some(Library::from_raw(raw)), exit, init_succeeded: false };
+            if let Some(entry) = entry {
+                if !entry(raw) {
+                    drop(serial);
+                    return Err("ModuleEntry returned false".to_string());
+                }
+                module.init_succeeded = true;
+            }
+            Ok(module)
+        }
+    }
+
+    /// The module's `GetPluginFactory`.
+    pub(super) fn factory(&self) -> Result<ComPtr<IPluginFactory>, String> {
+        let lib = self.lib.as_ref().ok_or("the module is unloaded")?;
+        // SAFETY: the standard VST3 factory entry, called on the owner thread with the module loaded.
+        unsafe {
+            let get = lib
+                .get::<unsafe extern "C" fn() -> *mut IPluginFactory>(b"GetPluginFactory\0")
+                .map_err(|_| "GetPluginFactory not exported".to_string())?;
+            ComPtr::from_raw(get()).ok_or_else(|| "GetPluginFactory returned null".to_string())
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Vst3Module {
+    fn drop(&mut self) {
+        let _serial = module_lock();
+        // SAFETY: ModuleExit only after this guard's matching ModuleEntry succeeded; every module COM
+        // object was released before the guard drops.
+        unsafe {
+            if self.init_succeeded {
+                if let Some(exit) = self.exit {
+                    let _ = exit();
+                }
+            }
+        }
+        drop(self.lib.take());
     }
 }
 
@@ -1240,19 +1319,19 @@ fn list_vst3_params(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 #[path = "vst3_restart_fixture.rs"]
 mod restart_tests;
-#[cfg(test)]
+#[cfg(all(test, windows))]
 #[path = "vst3_resize_fixture.rs"]
 mod resize_tests;
-#[cfg(test)]
+#[cfg(all(test, windows))]
 #[path = "vst3_controller_fixture.rs"]
 mod controller_tests;
 
 /// Every `Vst3Module` load waits for `MODULE_LOCK`: one held elsewhere (another owner's load or drop)
 /// keeps it from reaching LoadLibrary until it is released.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod module_lock_tests {
     use super::*;
     use std::sync::mpsc;
@@ -1281,16 +1360,16 @@ pub(super) mod engine;
 
 // DEV Stage 1 premise spike (`docs/ARCHITECTURE.md` § Measured premise): the VST3 load + process sequence,
 // copied into one native device callback. A child here to reach the private load items.
-#[cfg(debug_assertions)]
+#[cfg(all(windows, debug_assertions))]
 #[path = "engine_spike.rs"]
 mod engine_spike;
-#[cfg(debug_assertions)]
+#[cfg(all(windows, debug_assertions))]
 pub(crate) use engine_spike::run as engine_spike_run;
 
 /// Audit B5: `restartComponent`'s whole body is `RestartFlags::raise`, so a plugin calling it from
 /// its own worker thread must touch nothing but atomics there — no log (a lock + allocation), no
 /// emit and no event-ring push. The owner's drain then sees every flag, split by kind.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod restart_flag_tests {
     use super::*;
     use rtrb::RingBuffer;

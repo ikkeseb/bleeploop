@@ -60,7 +60,8 @@ fn save(file: &Path, folders: &[String]) -> Result<(), String> {
 /// lowercased. The scan de-duplicates what it finds on the same key. Never store or show a key.
 pub(crate) fn path_key(path: &Path) -> String {
     let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    resolved.to_string_lossy().to_lowercase()
+    // Linux paths compare with case.
+    if cfg!(windows) { resolved.to_string_lossy().to_lowercase() } else { resolved.to_string_lossy().into_owned() }
 }
 
 /// Add `folder`, spelled as the dialog returned it, unless the list already holds that place
@@ -111,6 +112,7 @@ pub(crate) fn view(user: &[String], not_listed: NotListed) -> PluginFolders {
 /// The native folder dialog, modal over `owner`: `Ok(None)` when the player cancels. Call it ON THE
 /// UI THREAD, which owns `owner` (the main window): a dialog owned across threads is the editor-hang
 /// deadlock (`editor_window.rs`). It returns when the dialog closes; the caller holds no lock.
+#[cfg(windows)]
 pub(crate) fn pick_folder(owner: windows::Win32::Foundation::HWND) -> Result<Option<String>, String> {
     use windows::Win32::Foundation::ERROR_CANCELLED;
     use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
@@ -143,7 +145,7 @@ pub(crate) fn pick_folder(owner: windows::Win32::Foundation::HWND) -> Result<Opt
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
     use std::path::PathBuf;

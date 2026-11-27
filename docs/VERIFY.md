@@ -121,6 +121,28 @@ To test buffer negotiation without changing the desktop graph, run
 refused route leaves the old one running, then closes and reopens the selected route.
 The standalone probe below isolates the device and engine if the desktop flow fails.
 
+## Linux plugin hosting
+
+The Linux app hosts CLAP and VST3 plugins in its slots with the Windows host's owners
+(`src-tauri/src/linux_audio/plugins.rs`). Two tests load real test plugins through that host and
+render offline on the idle engine, no device and nothing audible: a steady input through slot 0 with
+GO LIVE must come out ×0.5 at the plugin's default, ×1.5 after a host-set parameter, ×1.5 again once a
+rebuild at 44.1 kHz has evicted and re-activated it, dry after the unload, and ×1.5 at the next load
+from the tone the unload saved. A pass-through build of the plugin fails the first check.
+
+```sh
+sh verify/linux-plugins/build.sh /tmp/lf-plugins
+cd src-tauri && LF_TEST_CLAP=/tmp/lf-plugins/clap/LfTestGain.clap \
+  LF_TEST_VST3=/tmp/lf-plugins/vst3/LfTestGain.vst3 \
+  cargo test --lib linux_audio::plugins -- --ignored --nocapture
+```
+
+The scan child runs on its own too: `target/debug/app --scan-one <path>` prints the descriptor. The
+scan walks `~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap`, `CLAP_PATH`, then the same for VST3
+(`~/.vst3`, `VST3_PATH`); `:` separates a path list. A Windows VST3 bridged by yabridge loads Wine in
+the scan child: Archetype Petrucci X had not answered after 60 s (its Wine log showed TLS traffic), so
+the scan's 20 s bound lists it as failed. Plugin editor windows are not hosted on Linux yet.
+
 ## Linux JACK device probe
 
 The standalone crate in `verify/linux-audio/` runs `lf-engine` in one duplex JACK callback.

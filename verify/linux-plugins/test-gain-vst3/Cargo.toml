@@ -1,0 +1,16 @@
+# The VST3 twin of `test-gain-clap`: a separated component and controller (as Surge XT is), stereo in,
+# stereo out, out = in × GAIN. Its own workspace, so the app's gates never build it
+# (`docs/VERIFY.md § Linux plugin hosting`).
+[package]
+name = "lf-test-gain-vst3"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vst3 = "0.3"

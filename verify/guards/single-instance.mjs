@@ -205,7 +205,7 @@ check('the lock is wired, the children leave first, the plugin is gone', () => {
 // ── 2. The readers: each mutation of the repo's own text goes red ─────────────────────────────────
 const CALL = repo.lib.match(/ *if let single_instance::Claim::Exit[^]*?\n {4}\}\n/)?.[0] ?? '';
 const SCAN = repo.lib.match(/ *if let Some\(pos\) = args\.iter\(\)\.position\(\|a\| a == "--scan-one"\) \{[^]*?\n {8}\}\n/)?.[0] ?? '';
-const ENGINE = repo.lib.match(/ *#\[cfg\(debug_assertions\)\]\n *if let Some\(pos\) = args\.iter\(\)\.position\(\|a\| a == "--probe-engine"\) \{[^]*?\n {8}\}\n/)?.[0] ?? '';
+const ENGINE = repo.lib.match(/ *#\[cfg\((?:all\(windows, )?debug_assertions\)?\)\]\n *if let Some\(pos\) = args\.iter\(\)\.position\(\|a\| a == "--probe-engine"\) \{[^]*?\n {8}\}\n/)?.[0] ?? '';
 const TAKEOVER = repo.module.match(/ *Found::Nothing if waited => \{[^]*?\n {12}\}\n/)?.[0] ?? '';
 const swap = (key, from, to) => (t) => {
   assert.ok(from && t[key].includes(from), `the mutation's text is in ${key}: ${from}`);

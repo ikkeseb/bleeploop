@@ -880,14 +880,17 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
           <div class="audio-settings__folders" role="group" aria-label="Plugin folders">
             <div class="audio-settings__row" title="The folders the plugin scan walks">
               <span class="audio-settings__label">folders</span>
-              <button
-                type="button"
-                class="audio-settings__btn"
-                disabled={scanning() || pluginFoldersBusy()}
-                onClick={() => void addPluginFolder()}
-              >
-                Add folder…
-              </button>
+              {/* The Linux app has no native folder dialog yet: it scans the spec folders and CLAP_PATH / VST3_PATH. */}
+              <Show when={!jackHost}>
+                <button
+                  type="button"
+                  class="audio-settings__btn"
+                  disabled={scanning() || pluginFoldersBusy()}
+                  onClick={() => void addPluginFolder()}
+                >
+                  Add folder…
+                </button>
+              </Show>
             </div>
             <ul class="audio-settings__folder-list">
               <For each={pluginFolders().builtin}>
@@ -922,7 +925,9 @@ export function AudioSettings(props: { page: SettingsPage; onPage: (page: Settin
             </ul>
             <Show when={!scanning() && availablePlugins().length === 0}>
               <div class="audio-settings__hint audio-settings__hint--info" role="note">
-                No plugins found yet: press Add folder… and pick the folder your CLAP, VST3 or VST2 plugins are in.
+                {jackHost
+                  ? 'No plugins found yet: put your CLAP or VST3 plugins in ~/.clap or ~/.vst3, then rescan.'
+                  : 'No plugins found yet: press Add folder… and pick the folder your CLAP, VST3 or VST2 plugins are in.'}
               </div>
             </Show>
             <Show when={notLoaded().length > 0}>

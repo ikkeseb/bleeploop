@@ -53,6 +53,35 @@ tauri-plugin-updater = { version = "~2.12", default-features = false, features =
 lf-engine = { path = "crates/lf-engine" }
 rtrb = "0.3.4"
 
+# The CLAP and VST3 plugin hosts (`src/host/`) run on Windows and Linux too.
+# --- P9: native CLAP host ---
+# clack 0.1.0 is brand-new (single maintainer). Pin EXACT + commit Cargo.lock; clap-sys 0.5 raw FFI
+# is the break-glass. clack-finder is unpublished — directory scanning is hand-rolled with walkdir.
+clack-host       = "=0.1.0"
+# note-ports pulled now (cheap) for P9.3/P9.4 note injection into the instrument input port.
+# "clack-host" is REQUIRED for the host-side audio_ports wrappers (PluginAudioPorts::count/get,
+# AudioPortInfoBuffer) — they live behind `#[cfg(feature = "clack-host")]` in clack-extensions, an
+# implicit feature from its *optional* clack-host dep. Our own clack-host dep does NOT flip it; this
+# feature does (verified against clack-extensions-0.1.0 source: audio_ports.rs gates host/ on it).
+# P10.0 adds "gui" (host-side CLAP gui ext for the floating editor). NOTE: `raw_window_handle_06` is
+# NOT needed for floating — `gui::Window::from_win32_hwnd` is safe + ungated (verified vs the 0.1.0
+# crate source); only embedded would want it. So: just "gui".
+clack-extensions = { version = "=0.1.0", features = ["params", "state", "audio-ports", "note-ports", "clack-host", "gui"] }
+# --- P10.1: native VST3 host ---
+# `vst3` 0.3.0 (coupler-rs): raw unsafe Steinberg FUnknown bindings. Only runtime
+# dep is `com-scrape-types` (NO windows/windows-core), so it cannot reconflict the pinned 0.61 graph
+# (confirm with `cargo tree -d`). VST3 "COM" is Steinberg's FUnknown ABI, not MS-COM — no apartments.
+vst3             = "0.3"
+walkdir          = "2"                      # the plugin scan's folder walk: CLAP, VST3 and VST2 (no clack-finder)
+# Chain mode's rig record rules (briefing: crates/lf-rig/src/lib.rs): pure, driven by `engine_io`; the
+# tone store (`host/tone.rs`) shares its save timing.
+lf-rig           = { path = "crates/lf-rig" }
+
+# Linux loads a VST3 module with dlopen (the Windows host uses LoadLibraryW); clack's own loader is
+# this crate too, so the lock holds one version.
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading       = "0.8"
+
 # The Windows device side and plugin host use cpal, Win32 and the WebView2 COM bindings.
 [target.'cfg(windows)'.dependencies]
 # deny the WebView2 Web MIDI permission (`lib.rs`) — already transitive via tauri; pinned to the resolved
@@ -92,19 +121,6 @@ windows = { version = "0.61", features = [
 # windows-core 0.61 lines cpal up with Tauri. Tauri can't move to 0.62, so we unify down.
 windows-core = "0.61"
 
-# --- P9: native CLAP host ---
-# clack 0.1.0 is brand-new (single maintainer). Pin EXACT + commit Cargo.lock; clap-sys 0.5 raw FFI
-# is the break-glass. clack-finder is unpublished — directory scanning is hand-rolled with walkdir.
-clack-host       = "=0.1.0"
-# note-ports pulled now (cheap) for P9.3/P9.4 note injection into the instrument input port.
-# "clack-host" is REQUIRED for the host-side audio_ports wrappers (PluginAudioPorts::count/get,
-# AudioPortInfoBuffer) — they live behind `#[cfg(feature = "clack-host")]` in clack-extensions, an
-# implicit feature from its *optional* clack-host dep. Our own clack-host dep does NOT flip it; this
-# feature does (verified against clack-extensions-0.1.0 source: audio_ports.rs gates host/ on it).
-# P10.0 adds "gui" (host-side CLAP gui ext for the floating editor). NOTE: `raw_window_handle_06` is
-# NOT needed for floating — `gui::Window::from_win32_hwnd` is safe + ungated (verified vs the 0.1.0
-# crate source); only embedded would want it. So: just "gui".
-clack-extensions = { version = "=0.1.0", features = ["params", "state", "audio-ports", "note-ports", "clack-host", "gui"] }
 # cpal opens the native engine's devices (engine_io::cpal_driver). Its `realtime` feature is just
 # `dep:audio_thread_priority` under the hood (confirmed in cpal 0.18.1's manifest) — not something to
 # carry blindly. The engine promotes its callback threads itself via the windows crate
@@ -118,17 +134,9 @@ cpal             = { version = "=0.18.1", default-features = false }
 # pinned with cpal. Only under the `asio` feature.
 asio-sys         = { version = "=0.3.0", optional = true }
 rubato           = "3.0.0"                  # the engine pipes' fractional resampler (engine_io::pipes)
-walkdir          = "2"                      # the plugin scan's folder walk: CLAP, VST3 and VST2 (no clack-finder)
-# Chain mode's rig record rules (briefing: crates/lf-rig/src/lib.rs): pure, driven by `engine_io`.
-lf-rig           = { path = "crates/lf-rig" }
 # Native MIDI input for the engine (engine_io::midi; WinMM on Windows). 0.11 accepts windows
 # >=0.59,<=0.62; the lock holds it on 0.61 with the rest of the graph (see windows-core above).
 midir            = "0.11"
-# --- P10.1: native VST3 host ---
-# `vst3` 0.3.0 (coupler-rs): raw unsafe Steinberg FUnknown bindings. Only runtime
-# dep is `com-scrape-types` (NO windows/windows-core), so it cannot reconflict the pinned 0.61 graph
-# (confirm with `cargo tree -d`). VST3 "COM" is Steinberg's FUnknown ABI, not MS-COM — no apartments.
-vst3             = "0.3"
 
 # --- RT-loop perf for a prod-realistic `tauri dev` by-ear ---
 # opt-level=3 on EVERY dependency so the DEBUG RT audio loop runs near release speed: rubato's

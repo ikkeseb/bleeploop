@@ -36,9 +36,14 @@ use clack_host::utils::{ClapId, Cookie};
 
 use rtrb::Consumer;
 
+#[cfg(windows)]
 use windows::Win32::Foundation::HWND;
+#[cfg(windows)]
 use windows::Win32::System::Threading::GetCurrentThreadId;
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+#[cfg(target_os = "linux")]
+use super::editor_window::{GetCurrentThreadId, GetWindowThreadProcessId, HWND};
 
 // ---- P9.5 control plane: main→audio event ring + main→owner state requests -----------------
 
@@ -508,10 +513,11 @@ fn deliver_plugin_callback(instance: &mut PluginInstance<LfHost>) {
     }
 }
 
-#[cfg(test)]
+// The fixtures drive the Windows engine's test rig and a Win32 host window.
+#[cfg(all(test, windows))]
 #[path = "clap_callback_fixture.rs"]
 mod callback_tests;
-#[cfg(test)]
+#[cfg(all(test, windows))]
 #[path = "clap_restart_fixture.rs"]
 mod restart_tests;
 
@@ -519,7 +525,7 @@ mod restart_tests;
 /// while no hosted editor is open (floating or closed), honoured — client area exactly the
 /// requested size — once `editor_open` has published the window, refused again after teardown
 /// forgets it.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod resize_tests {
     use super::super::editor_window::{client_size, create_host_window, pump_thread_messages};
     use super::*;
@@ -860,11 +866,14 @@ mod vst3_host;
 // engine's callback, each with its own owner thread (`engine_io/plugins.rs` routes to them).
 #[path = "engine_slot.rs"]
 pub(crate) mod engine_slot;
+// Chain units and VST2 are Windows-only: Linux hosts a slot's one plugin (`linux_audio/plugins.rs`).
+#[cfg(windows)]
 #[path = "unit_owner.rs"]
 pub(crate) mod unit_owner;
 #[path = "clap_engine.rs"]
 mod clap_engine;
+#[cfg(windows)]
 #[path = "vst2_engine.rs"]
 mod vst2_engine;
-#[cfg(debug_assertions)]
+#[cfg(all(windows, debug_assertions))]
 pub(crate) use vst3_host::engine_spike_run;

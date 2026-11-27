@@ -11,6 +11,7 @@ mod ends;
 mod feed;
 mod input;
 pub(crate) mod ipc;
+pub(crate) mod plugins;
 #[allow(dead_code)] // Shared MIDI parsing and hardware-owner routes; JACK currently takes page notes.
 #[path = "../engine_io/midi/parse.rs"]
 mod parse;
@@ -50,19 +51,31 @@ use settings::Settings;
 pub(crate) struct App {
     host: EngineHost,
     feed: FeedThread,
+    plugins: Arc<plugins::Slots>,
 }
 
 pub(crate) fn setup(app: &tauri::App) -> std::io::Result<()> {
     let host = EngineHost::default();
     let feed = FeedThread::spawn(host.clone())?;
-    app.manage(App { host, feed });
+    let tones = app.path().app_local_data_dir().ok().map(|dir| dir.join("tones"));
+    let plugins = Arc::new(plugins::Slots::new(host.clone(), tones));
+    app.manage(App { host, feed, plugins });
     Ok(())
+}
+
+/// The plugin slots and the engine host, for the `plugin_*` commands (`host/commands.rs`).
+pub(crate) fn plugin_slots(app: &tauri::AppHandle) -> Result<Arc<plugins::Slots>, String> {
+    let state = app.try_state::<App>().ok_or("the audio engine did not start")?;
+    Ok(state.plugins.clone())
 }
 
 pub(crate) fn shutdown(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<App>() {
         state.host.core.exiting.store(true, Release);
         state.feed.stop();
+        // While the device still plays: each plugin's tone is kept, then it leaves the engine.
+        state.plugins.save_tones_on_exit();
+        state.plugins.unload_all();
         state.host.close();
     }
 }
@@ -93,6 +106,8 @@ struct Core {
     tuner_fence: AtomicI64,
     tuner_breaks: AtomicU64,
     chains: Arc<[chain::ChainState; SLOT_COUNT]>,
+    /// The engine's slot ports and the plugin units seated through them (`plugins.rs`).
+    ports: Mutex<plugins::SlotPorts>,
 }
 
 impl Core {
@@ -150,8 +165,8 @@ mod chain {
     }
 }
 
-fn engine_ends(handle: EngineHandle, rate: u32) -> Ends {
-    Ends {
+fn engine_ends(handle: EngineHandle, rate: u32) -> (Ends, [lf_engine::SlotPort; SLOT_COUNT]) {
+    let ends = Ends {
         commands: handle.commands,
         pushed: 0,
         events: handle.events,
@@ -162,7 +177,8 @@ fn engine_ends(handle: EngineHandle, rate: u32) -> Ends {
         tuner: handle.tuner,
         rate,
         unit_meters: handle.unit_meters,
-    }
+    };
+    (ends, handle.slots)
 }
 
 impl EngineHost {
@@ -284,7 +300,7 @@ impl EngineHost {
             // Pool allocation is off the run lock. A snapshot of the previous session still has
             // its retained engine here until this candidate takes over.
             let (engine, handle) = Engine::new(EngineConfig::new(rate));
-            let mut ends = engine_ends(handle, rate);
+            let (mut ends, ports) = engine_ends(handle, rate);
             let mut run = lock(&self.core.run);
             let mut settings = lock(&self.core.settings);
             let replay: Vec<_> = settings.replay().collect();
@@ -312,8 +328,9 @@ impl EngineHost {
             let old_engine = run.idle.take();
             run.frame = 0;
             run.input.rebuilt(self);
+            // The plugin units leave the replaced engine for their owners, who re-activate them here.
+            plugins::replace_ports(&self.core, old_engine, Some(ports));
             drop(run);
-            drop(old_engine);
             device
         };
         let status = device.status();
@@ -337,8 +354,11 @@ impl EngineHost {
             let mut ends = lock(&self.core.ends);
             self.core.engine_gen.fetch_add(1, Release);
             *ends = None;
+            drop(ends);
             run.idle = None;
             run.frame = 0;
+            // Never drop a plugin unit with the engine: it goes back to its owner (or leaks).
+            plugins::replace_ports(&self.core, Some(engine), None);
             return;
         }
         engine.punch_out();
@@ -537,7 +557,7 @@ mod tests {
         let mut config = EngineConfig::new(RATE);
         config.max_loop_seconds = 3.0;
         let (mut engine, handle) = Engine::new(config);
-        *lock(&host.core.ends) = Some(engine_ends(handle, RATE));
+        *lock(&host.core.ends) = Some(engine_ends(handle, RATE).0);
         let mut input = input::Input::default();
         let epoch = input.subscribe(&host, 1.0, Channel::new(|_| Ok(())), true);
         let mut send = |payload: Value| {
@@ -635,7 +655,7 @@ mod tests {
         let mut config = EngineConfig::new(16_000);
         config.max_loop_seconds = 1.0;
         let (mut engine, handle) = Engine::new(config);
-        *lock(&host.core.ends) = Some(engine_ends(handle, 16_000));
+        *lock(&host.core.ends) = Some(engine_ends(handle, 16_000).0);
         let epoch = {
             let mut run = lock(&host.core.run);
             let epoch = run

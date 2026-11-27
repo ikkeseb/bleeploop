@@ -13,6 +13,7 @@ use super::super::engine_slot::{
     own, restore_tone, serve, slot_terms, Editor, EngineSlotEvent, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported,
     Restore, Setup, FAULT_PROCESS, FAULT_START,
 };
+#[cfg(windows)]
 use super::super::unit_owner::{serve_unit, UnitCtx};
 use super::super::super::tone;
 use super::*;
@@ -372,6 +373,17 @@ fn sync_controller(plugin: &Vst3Plugin, slot: usize) -> Result<(), String> {
 pub(super) type Opened = (Option<Vst3Module>, ComPtr<IPluginFactory>);
 
 /// Load the VST3 bundle at `path` and resolve its factory.
+#[cfg(target_os = "linux")]
+fn open_bundle(path: String) -> Result<Opened, String> {
+    let binary = super::super::super::scan::resolve_vst3_binary(std::path::Path::new(&path))
+        .ok_or_else(|| format!("no loadable VST3 binary inside {path}"))?;
+    let module = Vst3Module::load(&binary)?;
+    let factory = module.factory()?;
+    Ok((Some(module), factory))
+}
+
+/// Load the VST3 bundle at `path` and resolve its factory.
+#[cfg(windows)]
 fn open_bundle(path: String) -> Result<Opened, String> {
     let binary = super::super::super::scan::resolve_vst3_binary(std::path::Path::new(&path))
         .ok_or_else(|| format!("no loadable VST3 binary inside {path}"))?;
@@ -395,6 +407,7 @@ pub(in super::super) fn run(ctx: OwnerCtx, path: String, id: &str) -> Result<(),
 }
 
 /// The chain-unit production owner: load the bundle at `path`.
+#[cfg(windows)]
 pub(in super::super) fn run_unit(ctx: UnitCtx, path: String, id: &str) -> Result<(), String> {
     run_unit_with(ctx, id, move || open_bundle(path))
 }
@@ -517,6 +530,7 @@ pub(super) fn run_with(
 }
 
 /// The chain-unit VST3 owner (`unit_owner::serve_unit`). `open` yields the module and factory.
+#[cfg(windows)]
 pub(super) fn run_unit_with(
     ctx: UnitCtx,
     id: &str,

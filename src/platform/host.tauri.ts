@@ -77,7 +77,7 @@ function requireEpoch(): number {
 export const jackHost = '__LF_JACK__' in globalThis;
 
 const tauriPluginHost: PluginHost = {
-  available: !jackHost,
+  available: true,
   async init() {
     frontendEpoch = await invoke<number>('host_init');
   },
