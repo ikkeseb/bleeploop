@@ -342,7 +342,11 @@ fn editor_open(
     // A test's window stays hidden, as VST2's `show_editor`: nothing appears or takes the focus on
     // the machine that runs it.
     if cfg!(not(test)) {
-        show_host_window_front(host_win.hwnd);
+        if let Err(e) = show_host_window_front(host_win.hwnd) {
+            let _ = gui.hide(&mut handle);
+            gui.destroy(&mut handle);
+            return Err(e);
+        }
     }
     // From here the plugin's `request_resize` has a window to resize; one left from an earlier
     // editor is forgotten first.
@@ -519,19 +523,20 @@ impl HostStateImpl for LfMain {
 }
 /// The plugin's timers and fds, run by the owner's loop on this (main) thread and called back from
 /// `Clap::idle` (`dispatch_run_loop`): what an embedded X11 editor draws and takes input with. A call
-/// off the owner thread is refused (`OwnerThread`): it would land in the caller's registry.
+/// off the owner thread is refused (`OwnerThread`): it would land in the caller's registry. Clack hands
+/// even a foreign caller `&mut LfMain`; these impls touch only `owner` (its id, its atomic count).
 #[cfg(target_os = "linux")]
 const OFF_OWNER: HostError = HostError::Message("not the plugin's main thread");
 #[cfg(target_os = "linux")]
 impl HostTimerImpl for LfMain {
     fn register_timer(&mut self, period_ms: u32) -> Result<TimerId, HostError> {
-        if !self.owner.admits("timer-support.register_timer") {
+        if !self.owner.admits() {
             return Err(OFF_OWNER);
         }
         Ok(TimerId(super::editor_window::register_timer(period_ms)))
     }
     fn unregister_timer(&mut self, timer_id: TimerId) -> Result<(), HostError> {
-        if !self.owner.admits("timer-support.unregister_timer") {
+        if !self.owner.admits() {
             return Err(OFF_OWNER);
         }
         super::editor_window::unregister_timer(timer_id.0).then_some(()).ok_or(HostError::Message("no such timer"))
@@ -540,19 +545,19 @@ impl HostTimerImpl for LfMain {
 #[cfg(target_os = "linux")]
 impl HostPosixFdImpl for LfMain {
     fn register_fd(&mut self, fd: std::os::fd::RawFd, flags: FdFlags) -> Result<(), HostError> {
-        if !self.owner.admits("posix-fd-support.register_fd") {
+        if !self.owner.admits() {
             return Err(OFF_OWNER);
         }
         super::editor_window::register_fd(fd, flags.bits()).then_some(()).ok_or(HostError::Message("fd already registered"))
     }
     fn modify_fd(&mut self, fd: std::os::fd::RawFd, flags: FdFlags) -> Result<(), HostError> {
-        if !self.owner.admits("posix-fd-support.modify_fd") {
+        if !self.owner.admits() {
             return Err(OFF_OWNER);
         }
         super::editor_window::modify_fd(fd, flags.bits()).then_some(()).ok_or(HostError::Message("fd not registered"))
     }
     fn unregister_fd(&mut self, fd: std::os::fd::RawFd) -> Result<(), HostError> {
-        if !self.owner.admits("posix-fd-support.unregister_fd") {
+        if !self.owner.admits() {
             return Err(OFF_OWNER);
         }
         super::editor_window::unregister_fd(fd).then_some(()).ok_or(HostError::Message("fd not registered"))
@@ -597,6 +602,7 @@ mod owner_thread_tests {
 #[cfg(target_os = "linux")]
 fn dispatch_run_loop(instance: &mut PluginInstance<LfHost>) {
     use super::editor_window::{next_ready, Ready};
+    instance.access_handler_mut(|m| m.owner.log_refused("timer-support/posix-fd-support"));
     while let Some(ready) = next_ready() {
         let mut handle = instance.plugin_handle();
         match ready {

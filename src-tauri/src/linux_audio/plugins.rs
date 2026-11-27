@@ -666,6 +666,28 @@ mod tests {
     const BLOCK: usize = 256;
     const DRY: f32 = 0.125;
 
+    /// The host's own log lines on stderr (`--nocapture` shows them), from the first rig on.
+    struct StderrLog;
+
+    impl log::Log for StderrLog {
+        fn enabled(&self, metadata: &log::Metadata) -> bool {
+            metadata.level() <= log::Level::Info
+        }
+        fn log(&self, record: &log::Record) {
+            if self.enabled(record.metadata()) {
+                eprintln!("[{} {}] {}", record.level(), record.target(), record.args());
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    fn init_log() {
+        static LOG: StderrLog = StderrLog;
+        if log::set_logger(&LOG).is_ok() {
+            log::set_max_level(log::LevelFilter::Info);
+        }
+    }
+
     struct Rig {
         host: EngineHost,
         frame: i64,
@@ -673,6 +695,7 @@ mod tests {
 
     impl Rig {
         fn new(rate: u32) -> Rig {
+            init_log();
             let host = EngineHost::default();
             let rig = Rig { host, frame: 0 };
             rig.engine_at(rate);
@@ -905,8 +928,33 @@ mod tests {
     #[ignore = "needs LF_TEST_CLAP: docs/VERIFY.md § Linux plugin hosting"]
     fn a_clap_plugins_timer_and_fd_run_on_its_owner_loop_without_an_editor() {
         let path = std::env::var("LF_TEST_CLAP").expect("LF_TEST_CLAP names the built test plugin (docs/VERIFY.md § Linux plugin hosting)");
+        timer_and_fd_round_trip(&path, None);
+    }
+
+    /// An instance that leaves its timer and fd registered at `destroy`, on an owner that lives on: the
+    /// test plugin refuses the stored tone `LEAKREGS` and leaks its registrations, and the owner
+    /// destroys it and creates the next instance. The host must forget them: the plugin aborts the
+    /// process on a callback for a registration the new instance does not hold.
+    #[test]
+    #[ignore = "needs LF_TEST_CLAP: docs/VERIFY.md § Linux plugin hosting"]
+    fn a_clap_plugins_leftover_timer_and_fd_are_forgotten_at_its_destroy() {
+        use crate::host::tone::{encode, Tone};
+        let path = std::env::var("LF_TEST_CLAP").expect("LF_TEST_CLAP names the built test plugin (docs/VERIFY.md § Linux plugin hosting)");
+        let tones = std::env::temp_dir().join(format!("lf-linux-plugin-leak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tones);
+        let identity = ToneIdentity { format: PluginFormat::Clap.as_str().into(), path: path.clone(), id: "dev.bleeploop.test-gain".into() };
+        let store = ToneStore::new(tones.clone());
+        let leak = Tone { identity: identity.clone(), name: "LF Test Gain".into(), state: b"LEAKREGS".to_vec() };
+        store.save_encoded(0, &encode(&leak)).expect("the tone file");
+        timer_and_fd_round_trip(&path, Some(ToneBinding { store, key: ToneKey::Slot { slot: 0, identity }, imported: None }));
+        let _ = std::fs::remove_dir_all(&tones);
+    }
+
+    /// The test plugin's timer and fd counts rise on its owner loop; the unload ends them, and a
+    /// callback after it would abort the process.
+    fn timer_and_fd_round_trip(path: &str, tone: Option<ToneBinding>) {
         let mut rig = Rig::new(RATE);
-        let handle = rig.load(PluginFormat::Clap, &path, "dev.bleeploop.test-gain", None);
+        let handle = rig.load(PluginFormat::Clap, path, "dev.bleeploop.test-gain", tone);
         let counts = || {
             let params = handle.list_params().expect("params");
             let count = |name: &str| params.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("a {name} parameter")).value;
@@ -940,8 +988,20 @@ mod tests {
         fn connect() -> Screen {
             assert!(std::env::var_os("DISPLAY").is_some(), "DISPLAY names a private Xvfb (docs/VERIFY.md § Linux plugin hosting)");
             use x11rb::connection::Connection as _;
+            use x11rb::protocol::xproto::ConnectionExt as _;
             let (conn, screen) = x11rb::connect(None).expect("the X display");
             let root = conn.setup().roots[screen].root;
+            // A window manager's stand-in: a desktop's window manager has interned these long before a
+            // plugin loads, and a bare Xvfb has none. JUCE looks them up only if they exist, when its
+            // editor is created (before the host window), and later sets `WM_PROTOCOLS` on its window
+            // with the atom it got: 0 here, a `BadAtom` that Xlib's default handler ends the process on.
+            for name in [
+                "WM_PROTOCOLS", "WM_DELETE_WINDOW", "WM_TAKE_FOCUS", "WM_STATE", "WM_CHANGE_STATE",
+                "_NET_WM_PING", "_NET_WM_STATE", "_NET_WM_STATE_HIDDEN", "_NET_WM_WINDOW_TYPE",
+                "_NET_WM_WINDOW_TYPE_NORMAL", "_NET_WORKAREA", "_MOTIF_WM_HINTS",
+            ] {
+                conn.intern_atom(false, name.as_bytes()).unwrap().reply().expect("an atom");
+            }
             Screen { conn, root }
         }
 
@@ -966,11 +1026,10 @@ mod tests {
             (at.dst_x, at.dst_y, g.width, g.height)
         }
 
-        /// The window's pixels (its children's drawing included).
-        fn pixels(&self, window: u32) -> Vec<u8> {
+        /// The pixels of `area` (x, y, width, height in window coordinates).
+        fn area_pixels(&self, window: u32, (x, y, w, h): (i16, i16, u16, u16)) -> Vec<u8> {
             use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
-            let (_, _, w, h) = self.geometry(window);
-            self.conn.get_image(ImageFormat::Z_PIXMAP, window, 0, 0, w, h, !0).unwrap().reply().unwrap().data
+            self.conn.get_image(ImageFormat::Z_PIXMAP, window, x, y, w, h, !0).unwrap().reply().unwrap().data
         }
 
         /// How many distinct colours the window shows (its children's drawing included): a window the
@@ -1032,25 +1091,50 @@ mod tests {
         }
     }
 
-    /// Drag across the editor's lower right (Surge's envelope sliders) until a parameter's live value
-    /// moves; the drag that moved it, and the parameter's name. `up`: drag upward (else downward).
-    fn drag_until_a_param_moves(rig: &mut Rig, screen: &Screen, window: u32, handle: &EngineSlotHandle, up: bool) -> Option<String> {
+    type Events = Arc<Mutex<Vec<EngineSlotEvent>>>;
+
+    /// One drag from `from` to `to`: the parameter it moved, when it moved one. It must move exactly
+    /// one (the control under it), reach the host as that parameter's `performEdit` (VST3), and the
+    /// plugin must redraw the drag's own area of the window.
+    fn drag_one(rig: &mut Rig, screen: &Screen, window: u32, handle: &EngineSlotHandle, events: &Events, format: PluginFormat, from: (i16, i16), to: (i16, i16)) -> Option<u32> {
+        let (_, _, w, h) = screen.geometry(window);
+        // The drag's column, 24 px either side, from above its top to below its bottom.
+        let (x0, y0) = ((from.0 - 24).max(0), (from.1.min(to.1) - 24).max(0));
+        let area = (x0, y0, 48.min(w - x0 as u16), ((from.1 - to.1).unsigned_abs() + 48).min(h - y0 as u16));
+        let before = handle.list_params().expect("params");
+        let drawn = screen.area_pixels(window, area);
+        events.lock().unwrap().clear();
+        screen.drag(window, from, to);
+        rig.run_for(Duration::from_millis(150));
+        let after = handle.list_params().expect("params");
+        let moved: Vec<_> = before.iter().zip(&after).filter(|(b, a)| b.id == a.id && (b.value - a.value).abs() > 1e-6).collect();
+        let [(b, a)] = moved.as_slice() else {
+            let names: Vec<_> = moved.iter().map(|(b, _)| b.name.as_str()).collect();
+            assert!(names.is_empty(), "one drag moved {} parameters: {names:?}", names.len());
+            return None;
+        };
+        eprintln!("drag {from:?} → {to:?} moved {:?} (id {}): {} → {}", b.name, b.id, b.value, a.value);
+        if format == PluginFormat::Vst3 {
+            let edited = events.lock().unwrap().iter().any(|e| matches!(e, EngineSlotEvent::ParamChanged { id, .. } if *id == b.id));
+            assert!(edited, "performEdit of the dragged parameter {:?} reached the host", b.name);
+        }
+        assert!(rig.run_until(Duration::from_secs(2), |_| screen.area_pixels(window, area) != drawn), "the plugin redrew the dragged control {:?}", b.name);
+        Some(b.id)
+    }
+
+    /// Drag upward across the editor's lower right (Surge's envelope and LFO sliders) until a drag
+    /// moves a parameter: its start point and the parameter's id and name.
+    fn find_a_control(rig: &mut Rig, screen: &Screen, window: u32, handle: &EngineSlotHandle, events: &Events, format: PluginFormat) -> Option<((i16, i16), u32, String)> {
         let (_, _, w, h) = screen.geometry(window);
         let (w, h) = (i32::from(w), i32::from(h));
         // In i32: a 900 px editor times a percentage overflows i16.
         let point = |x: i32, y: i32| (i16::try_from(x).expect("on the screen"), i16::try_from(y).expect("on the screen"));
-        let before = handle.list_params().expect("params");
         for row in [80, 88, 72] {
             for col in (52..=96).step_by(4) {
                 let (x, y) = (w * col / 100, h * row / 100);
-                let from = point(x, y);
-                let to = point(x, if up { y - h / 12 } else { y + h / 12 });
-                screen.drag(window, from, to);
-                rig.run_for(Duration::from_millis(150));
-                let after = handle.list_params().expect("params");
-                if let Some(moved) = before.iter().zip(&after).find(|(b, a)| b.id == a.id && (b.value - a.value).abs() > 1e-6) {
-                    eprintln!("drag {from:?} → {to:?} moved {:?}: {} → {}", moved.0.name, moved.0.value, moved.1.value);
-                    return Some(moved.0.name.clone());
+                if let Some(id) = drag_one(rig, screen, window, handle, events, format, point(x, y), point(x, y - h / 12)) {
+                    let name = handle.list_params().expect("params").into_iter().find(|p| p.id == id).map(|p| p.name).unwrap_or_default();
+                    return Some((point(x, y), id, name));
                 }
             }
         }
@@ -1090,11 +1174,8 @@ mod tests {
         let window = window.unwrap();
         assert!(rig.run_until(Duration::from_secs(10), |_| screen.colours(window) > 50), "the editor draws into it");
         screen.shot(&format!("{tag}-1-open"));
-        let moved = drag_until_a_param_moves(&mut rig, &screen, window, &handle, true).expect("an XTEST drag moves a parameter");
-        screen.shot(&format!("{tag}-2-dragged-{}", moved.replace(|c: char| !c.is_ascii_alphanumeric(), "_")));
-        if format == PluginFormat::Vst3 {
-            assert!(events.lock().unwrap().iter().any(|e| matches!(e, EngineSlotEvent::ParamChanged { .. })), "performEdit reached the host");
-        }
+        let (at, dragged, name) = find_a_control(&mut rig, &screen, window, &handle, &events, format).expect("an XTEST drag moves a parameter");
+        screen.shot(&format!("{tag}-2-dragged-{}", name.replace(|c: char| !c.is_ascii_alphanumeric(), "_")));
 
         // A new engine at another rate: the owner re-activates the unit and installs it there, the
         // editor still open.
@@ -1107,15 +1188,12 @@ mod tests {
         assert!(replays, "the re-activated unit plays in the new engine");
         rig.send(Command::NoteOff(64));
         assert_eq!(screen.editor_window(), Some(window), "the editor stayed open across the rebuild");
-        // Shown by a new change, not by pixels from before the rebuild: a drag now must move a
-        // parameter (VST3: through performEdit again), and the plugin must redraw for it.
-        let drawn = screen.pixels(window);
-        events.lock().unwrap().clear();
-        drag_until_a_param_moves(&mut rig, &screen, window, &handle, false).expect("and still takes input");
-        if format == PluginFormat::Vst3 {
-            assert!(events.lock().unwrap().iter().any(|e| matches!(e, EngineSlotEvent::ParamChanged { .. })), "performEdit after the rebuild");
-        }
-        assert!(rig.run_until(Duration::from_secs(5), |_| screen.pixels(window) != drawn), "and still draws: the window changed");
+        // Shown by a new change, not by pixels from before the rebuild: the same control dragged back
+        // down must move the same parameter (VST3: through its performEdit), and the plugin must
+        // redraw it.
+        let back = (at.0, at.1 + i16::try_from(screen.geometry(window).3 / 12).unwrap());
+        let moved = drag_one(&mut rig, &screen, window, &handle, &events, format, at, back);
+        assert_eq!(moved, Some(dragged), "after the rebuild the drag moves {name:?} again");
         screen.shot(&format!("{tag}-3-after-rebuild"));
 
         // Closed by the app (CloseEditor).

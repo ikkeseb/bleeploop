@@ -653,7 +653,8 @@ impl Vst2Plugin {
 /// the focus on the machine that runs it.
 fn show_editor(hwnd: HWND) {
     if cfg!(not(test)) {
-        show_host_window_front(hwnd);
+        // Windows only (no VST2 on Linux), where showing never fails.
+        let _ = show_host_window_front(hwnd);
     }
 }
 

@@ -12,8 +12,10 @@
 //! it really has (`client_size`); **known limit:** a window manager that configures it to another size
 //! is logged, but the plugin is not told (no renegotiation). Creation, its properties and its map are
 //! checked requests, so an open the X server refused fails. The window is a minimal XEmbed embedder:
-//! the plugin's window gets `XEMBED_EMBEDDED_NOTIFY` when it arrives and the top-level's focus as
-//! `XEMBED_WINDOW_(DE)ACTIVATE` + `XEMBED_FOCUS_IN`/`OUT` (JUCE waits for these); nothing more of the
+//! every child window the plugin puts in it gets `XEMBED_EMBEDDED_NOTIFY` when it arrives (VSTGUI maps
+//! its editor on it), and the top-level's focus goes as `XEMBED_WINDOW_(DE)ACTIVATE` +
+//! `XEMBED_FOCUS_IN`/`OUT` to the children that carry `_XEMBED_INFO` (to all when none does: JUCE
+//! waits for these). A window destroyed under the owner counts as closed. Nothing more of the
 //! spec (no accelerators, no tab chain, no key forwarding). A test build maps the window at creation (the CLAP
 //! open shows it only outside tests, and an unmapped parent draws nothing); the Linux tests that open
 //! one need `DISPLAY`, which only a private Xvfb gives them.
@@ -29,9 +31,10 @@
 //! capped at what the owner loop asks (20 ms). With no hosted editor the owner loop waits on its
 //! request channel instead (as on Windows), so a plugin's timers then fire at its 20 ms turns.
 //!
-//! What runs here is the owner thread's; invariant 5 is untouched. The one thing another thread may
-//! call is the `GetWindowThreadProcessId`/`GetCurrentThreadId` pair (a CLAP `request_resize` from the
-//! audio thread): both read const-initialised thread-locals only, which never allocate.
+//! What runs here is the owner thread's; invariant 5 is untouched. What another thread may call is the
+//! `GetWindowThreadProcessId`/`GetCurrentThreadId` pair (a CLAP `request_resize` from the audio
+//! thread), which reads const-initialised thread-locals only, and `OwnerThread::admits`, which refuses
+//! a foreign registration with one atomic add (no log, no allocation; the owner logs it on its turn).
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -302,8 +305,8 @@ struct Window {
     /// processed that request is stale.
     asked_seq: u64,
     closed: bool,
-    /// The plugin's window embedded in this one (its first child), once it arrived.
-    child: Option<u32>,
+    /// The plugin's windows embedded in this one (its children), in the order they arrived.
+    children: Vec<u32>,
     /// The top-level has the focus (the XEmbed "window active" state).
     active: bool,
 }
@@ -317,30 +320,27 @@ enum Activation {
 
 impl Window {
     fn new(xid: u32, size: (u32, u32)) -> Window {
-        Window { xid, size, asked: size, asked_seq: 0, closed: false, child: None, active: false }
+        Window { xid, size, asked: size, asked_seq: 0, closed: false, children: Vec::new(), active: false }
     }
 
-    /// A child was created in or reparented into this window: the one to embed, when it is the
-    /// first.
-    fn child_arrived(&mut self, child: u32) -> Option<u32> {
-        if self.child.is_some() || child == self.xid {
-            return None;
+    /// A child was created in or reparented into this window: true when it is new (to embed).
+    fn child_arrived(&mut self, child: u32) -> bool {
+        if child == self.xid || self.children.contains(&child) {
+            return false;
         }
-        self.child = Some(child);
-        Some(child)
+        self.children.push(child);
+        true
     }
 
     /// A child was destroyed or reparented away.
     fn child_left(&mut self, child: u32) {
-        if self.child == Some(child) {
-            self.child = None;
-        }
+        self.children.retain(|&c| c != child);
     }
 
     /// The top-level's `FocusIn`/`FocusOut`: what to tell the child, when the window's active state
     /// changed. A grab's focus round trip and focus moving to or from the child itself (an inferior)
     /// change nothing.
-    fn focus(&mut self, focus_in: bool, detail: NotifyDetail, mode: NotifyMode) -> Option<(u32, Activation)> {
+    fn focus(&mut self, focus_in: bool, detail: NotifyDetail, mode: NotifyMode) -> Option<Activation> {
         if matches!(mode, NotifyMode::GRAB | NotifyMode::UNGRAB) || matches!(detail, NotifyDetail::INFERIOR | NotifyDetail::POINTER) {
             return None;
         }
@@ -348,7 +348,10 @@ impl Window {
             return None;
         }
         self.active = focus_in;
-        Some((self.child?, if focus_in { Activation::Active } else { Activation::Inactive }))
+        if self.children.is_empty() {
+            return None;
+        }
+        Some(if focus_in { Activation::Active } else { Activation::Inactive })
     }
 
     /// The window's own `ConfigureNotify` (sequence `seq`): the size it has now, unless the server
@@ -371,6 +374,7 @@ struct Display {
     net_wm_name: u32,
     utf8_string: u32,
     xembed: u32,
+    xembed_info: u32,
     windows: Vec<Window>,
 }
 
@@ -387,14 +391,14 @@ impl Display {
             let s = conn.setup().roots.get(screen).ok_or("the X display has no such screen")?;
             (s.root, s.black_pixel)
         };
-        let cookies = [b"WM_PROTOCOLS".as_slice(), b"WM_DELETE_WINDOW", b"_NET_WM_NAME", b"UTF8_STRING", b"_XEMBED"]
+        let cookies = [b"WM_PROTOCOLS".as_slice(), b"WM_DELETE_WINDOW", b"_NET_WM_NAME", b"UTF8_STRING", b"_XEMBED", b"_XEMBED_INFO"]
             .map(|name| conn.intern_atom(false, name));
-        let mut atoms = [0u32; 5];
+        let mut atoms = [0u32; 6];
         for (atom, cookie) in atoms.iter_mut().zip(cookies) {
             *atom = cookie?.reply()?.atom;
         }
-        let [wm_protocols, wm_delete, net_wm_name, utf8_string, xembed] = atoms;
-        Ok(Display { conn, root, black, wm_protocols, wm_delete, net_wm_name, utf8_string, xembed, windows: Vec::new() })
+        let [wm_protocols, wm_delete, net_wm_name, utf8_string, xembed, xembed_info] = atoms;
+        Ok(Display { conn, root, black, wm_protocols, wm_delete, net_wm_name, utf8_string, xembed, xembed_info, windows: Vec::new() })
     }
 
     fn window(&mut self, xid: u32) -> Option<&mut Window> {
@@ -498,17 +502,34 @@ impl Display {
     }
 
     /// A child arrived: `XEMBED_EMBEDDED_NOTIFY` (data1: the embedder, data2: protocol version 0),
-    /// then its activation when the window is active already. The minimal embedder JUCE and other
-    /// toolkits expect; no accelerators, no tab chain, and no `XSetInputFocus` (the spec keeps the X
-    /// focus on the embedder: a plugin that wants keys takes the focus itself on a click).
+    /// then its activation when the window is active already. Every child gets it: a plugin may
+    /// create a window of its own in ours before the one it embeds. The minimal embedder JUCE, VSTGUI
+    /// and other toolkits expect; no accelerators, no tab chain, and no `XSetInputFocus` (the spec
+    /// keeps the X focus on the embedder: a plugin that wants keys takes the focus itself on a click).
     fn embed(&mut self, host: u32, child: u32) {
         let Some(win) = self.window(host) else { return };
-        let Some(child) = win.child_arrived(child) else { return };
+        if !win.child_arrived(child) {
+            return;
+        }
         let active = win.active;
         self.xembed(child, XEMBED_EMBEDDED_NOTIFY, 0, host);
         if active {
             self.activate(child, Activation::Active);
         }
+    }
+
+    /// The children the top-level's focus goes to: those that carry `_XEMBED_INFO` (XEmbed clients),
+    /// or all of them when none does.
+    fn xembed_clients(&self, children: &[u32]) -> Vec<u32> {
+        let carries = |&child: &u32| {
+            self.conn
+                .get_property(false, child, self.xembed_info, AtomEnum::ANY, 0, 2)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .is_some_and(|p| p.type_ != x11rb::NONE)
+        };
+        let clients: Vec<u32> = children.iter().copied().filter(carries).collect();
+        if clients.is_empty() { children.to_vec() } else { clients }
     }
 
     /// Take every queued X event: a window manager's `WM_DELETE_WINDOW` marks its window closed and
@@ -551,6 +572,14 @@ impl Display {
                         win.child_left(ev.window);
                     }
                 }
+                // Destroyed by someone else (our own destroy forgets the window first): closed, as
+                // a window manager's close is.
+                Event::DestroyNotify(ev) => {
+                    if let Some(win) = self.window(ev.window) {
+                        log::warn!("[plugin_host] the editor window {:#x} was destroyed under its owner", ev.window);
+                        win.closed = true;
+                    }
+                }
                 Event::FocusIn(ev) => self.focus(ev.event, true, ev.detail, ev.mode),
                 Event::FocusOut(ev) => self.focus(ev.event, false, ev.detail, ev.mode),
                 Event::ConfigureNotify(ev) if ev.event == ev.window => {
@@ -575,7 +604,9 @@ impl Display {
 
     fn focus(&mut self, xid: u32, focus_in: bool, detail: NotifyDetail, mode: NotifyMode) {
         let Some(win) = self.window(xid) else { return };
-        if let Some((child, activation)) = win.focus(focus_in, detail, mode) {
+        let Some(activation) = win.focus(focus_in, detail, mode) else { return };
+        let children = win.children.clone();
+        for child in self.xembed_clients(&children) {
             self.activate(child, activation);
         }
     }
@@ -724,16 +755,14 @@ pub(super) fn set_client_size(hwnd: HWND, width: u32, height: u32) -> Option<(u3
 }
 
 /// Map the editor window and raise it, once, at open. Whether it takes the focus is the window
-/// manager's call.
-pub(super) fn show_host_window_front(hwnd: HWND) {
-    let Some(xid) = hwnd.xid() else { return };
-    with_owner(|o| {
-        if let Some(display) = o.display.as_ref() {
-            if let Err(e) = display.show(xid) {
-                log::warn!("[plugin_host] showing the editor window: {e}");
-            }
-        }
-    });
+/// manager's call. A map the X server refused fails the open (its caller tears the editor down).
+pub(super) fn show_host_window_front(hwnd: HWND) -> Result<(), String> {
+    let xid = hwnd.xid().ok_or("no editor window to show")?;
+    with_owner(|o| match o.display.as_ref() {
+        Some(display) => display.show(xid).map_err(|e| format!("showing the editor window: {e}")),
+        None => Err("no X connection for the editor window".to_string()),
+    })
+    .unwrap_or_else(|| Err("the owner thread is exiting".to_string()))
 }
 
 /// The owner's turn: take our X events (a close request), and queue the plugin's ready fds and due
@@ -825,26 +854,45 @@ pub(super) unsafe fn GetWindowThreadProcessId(hwnd: HWND, _pid: Option<*mut u32>
 /// thread: a JUCE module shares one message loop across its instances and can call instance B's
 /// host from instance A's owner. The editor-affinity rule (`src/ui/state/instrument.ts`
 /// `editorAffinityBlocker`) keeps that from happening; this refuses what gets past it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct OwnerThread(u32);
+#[derive(Debug)]
+pub(super) struct OwnerThread {
+    id: u32,
+    /// Calls refused since the owner last logged them (`take_refused`).
+    refused: AtomicU32,
+}
 
 impl Default for OwnerThread {
     /// The calling thread.
     fn default() -> Self {
         // SAFETY: the shim only reads and sets this thread's own token.
-        OwnerThread(unsafe { GetCurrentThreadId() })
+        OwnerThread { id: unsafe { GetCurrentThreadId() }, refused: AtomicU32::new(0) }
     }
 }
 
 impl OwnerThread {
-    /// Whether the calling thread is the owner; a call from any other is logged once here, and the
-    /// caller refuses it without touching any state.
-    pub(super) fn admits(self, what: &str) -> bool {
-        if self == OwnerThread::default() {
+    /// Whether the calling thread is the owner. A call from any other is only counted (it may come
+    /// from the audio thread, inside `process`: invariant 5), and the caller refuses it without
+    /// touching any state; the owner logs the count on its turn.
+    pub(super) fn admits(&self) -> bool {
+        // SAFETY: as in `default`.
+        if self.id == unsafe { GetCurrentThreadId() } {
             return true;
         }
-        log::warn!("[plugin_host] the plugin called {what} off its owner thread; refused");
+        self.refused.fetch_add(1, Relaxed);
         false
+    }
+
+    #[cfg(test)]
+    pub(super) fn refused(&self) -> u32 {
+        self.refused.load(Relaxed)
+    }
+
+    /// Owner turn: log the calls refused since the last turn, if any (`what`: the host extension).
+    pub(super) fn log_refused(&self, what: &str) {
+        let n = self.refused.swap(0, Relaxed);
+        if n > 0 {
+            log::warn!("[plugin_host] the plugin called {what} off its owner thread {n} time(s); refused");
+        }
     }
 }
 
@@ -867,6 +915,13 @@ mod tests {
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
+    }
+
+    /// A show with no window to map fails, so the open that asked for it fails too.
+    #[test]
+    fn showing_a_window_this_thread_does_not_hold_fails() {
+        assert!(show_host_window_front(HWND::from_xid(0)).is_err(), "no window");
+        assert!(show_host_window_front(HWND::from_xid(0x0060_0001)).is_err(), "no X connection on this thread");
     }
 
     #[test]
@@ -958,23 +1013,22 @@ mod tests {
     /// to it only when the active state changes, and a grab or a focus move into the child itself is
     /// no change.
     #[test]
-    fn the_embedder_embeds_its_first_child_and_follows_the_top_level_focus() {
+    fn the_embedder_embeds_every_child_and_follows_the_top_level_focus() {
         let (n, m) = (NotifyDetail::NONLINEAR, NotifyMode::NORMAL);
         let mut w = Window::new(10, (400, 300));
         assert_eq!(w.focus(true, n, m), None, "active, but no child to tell yet");
-        assert_eq!(w.child_arrived(10), None, "never itself");
-        assert_eq!(w.child_arrived(11), Some(11));
-        assert_eq!(w.child_arrived(11), None, "embedded once");
-        assert_eq!(w.child_arrived(12), None, "one client");
+        assert!(!w.child_arrived(10), "never itself");
+        assert!(w.child_arrived(11));
+        assert!(!w.child_arrived(11), "embedded once (created, then reparented)");
+        assert!(w.child_arrived(12), "a second child is embedded too");
         assert_eq!(w.focus(true, n, m), None, "already active");
         assert_eq!(w.focus(false, NotifyDetail::INFERIOR, m), None, "the focus went into the child");
         assert_eq!(w.focus(false, n, NotifyMode::GRAB), None, "a grab");
-        assert_eq!(w.focus(false, n, m), Some((11, Activation::Inactive)));
-        assert_eq!(w.focus(true, n, m), Some((11, Activation::Active)));
-        w.child_left(12);
-        assert_eq!(w.child, Some(11), "not the embedded child");
+        assert_eq!(w.focus(false, n, m), Some(Activation::Inactive));
+        assert_eq!(w.focus(true, n, m), Some(Activation::Active));
         w.child_left(11);
-        assert_eq!(w.child_arrived(12), Some(12), "the next child is embedded");
+        assert_eq!(w.children, [12], "the one that left is forgotten");
+        assert!(w.child_arrived(11), "and embedded again when it comes back");
     }
 
     /// A configure records the size the window has; one the server sent before it took the last

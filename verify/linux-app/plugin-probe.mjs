@@ -11,7 +11,7 @@
 // (VST3) there. At each open the runner finds the editor window on the display (`xprop`, by the
 // plugin's name and the host's `WM_CLASS`), checks the window the app logged is alive, and screenshots
 // the whole display beside SCREENSHOT.png; after each close (by the control, by the unload) that window
-// must be gone (`xprop -id` fails).
+// must be gone (`xprop -id` fails with BadWindow; any other failure proves nothing and fails).
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -86,13 +86,15 @@ const shots = [];
 const closes = [];
 /** The editor window the app logged last (`editor window 0x… open`). */
 let lastWindow = null;
-/** Whether window `id` exists on the private display. */
-const windowAlive = (id) => {
+/** Whether window `id` exists on the private display: `alive`, `gone` (only the server's BadWindow
+ * says so), or `unknown: …` (xprop failed otherwise, e.g. no connection: proves nothing). */
+const windowState = (id) => {
   try {
-    execFileSync('xprop', ['-display', display, '-id', id, 'WM_CLASS'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    return true;
-  } catch {
-    return false;
+    execFileSync('xprop', ['-display', display, '-id', id, 'WM_CLASS'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    return 'alive';
+  } catch (e) {
+    const said = String(e.stderr ?? e.message);
+    return /BadWindow/.test(said) ? 'gone' : `unknown: ${said.trim().split('\n')[0]}`;
   }
 };
 /** The editor window on the private display, by the plugin's name: its WM_CLASS, or null. */
@@ -122,7 +124,7 @@ const outcome = await new Promise((done) => {
           const file = shot.replace(/\.png$/, '') + `-editor-${shots.length + 1}-${event.format}.png`;
           execFileSync('import', ['-display', display, '-window', 'root', file]);
           const id = lastWindow;
-          shots.push({ ...event, window: found, id, alive: id !== null && windowAlive(id), file });
+          shots.push({ ...event, window: found, id, alive: id !== null && windowState(id) === 'alive', file });
           console.log('editor window:', found ?? 'NOT FOUND', id, '→', file);
         });
       }
@@ -130,8 +132,9 @@ const outcome = await new Promise((done) => {
         // The page holds still for 3 s after a close: the window the app made must be gone.
         const id = lastWindow;
         sleep(1500).then(() => {
-          closes.push({ ...event, id, gone: id !== null && !windowAlive(id) });
-          console.log('editor closed by', event.by, id, windowAlive(id ?? '0') ? 'STILL THERE' : 'gone');
+          const state = id === null ? 'no window logged' : windowState(id);
+          closes.push({ ...event, id, state, gone: state === 'gone' });
+          console.log('editor closed by', event.by, id, state);
         });
       }
       if (event.kind === 'done' || event.kind === 'failed') {
@@ -159,7 +162,7 @@ if (surge) {
     assert(s.alive, `the ${s.format} editor's window ${s.id} is alive`);
   }
   assert.equal(closes.length, 2, `two editor closes checked, got ${closes.length}`);
-  for (const c of closes) assert(c.gone, `the editor's window ${c.id} is gone after its close by ${c.by}`);
+  for (const c of closes) assert(c.gone, `the editor's window ${c.id} is gone after its close by ${c.by} (xprop: ${c.state})`);
   console.log('PASS: Surge XT\'s CLAP and VST3 editors opened from slot A (pick, then its editor control) on the private display');
 }
 process.exit(0);

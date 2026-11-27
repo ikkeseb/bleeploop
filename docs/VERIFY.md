@@ -131,9 +131,12 @@ rebuild at 44.1 kHz has evicted and re-activated it, dry after the unload, and Ã
 from the tone the unload saved. A pass-through build of the plugin fails the first check. A third
 runs the CLAP plugin's own 10 ms timer and fd (a socket pair it writes on each tick) through the
 owner loop with no editor and no display: both counts (its TICKS and FD WAKES parameters) must rise
-while it is loaded, and the plugin aborts the process on a callback after its `destroy`. The same
-filter selects the Surge editor tests below; without `DISPLAY` and their plugin they print `SKIPPED`
-and pass.
+while it is loaded, and the plugin aborts the process on a callback after its `destroy` or for a
+registration it does not hold. A fourth stores the tone `LEAKREGS`, which the plugin refuses and then
+leaves its timer and fd registered at `destroy`: the owner creates the next instance on the same loop,
+and the host must have forgotten both (without `forget_registrations` on that path the plugin aborts).
+The same filter selects the Surge editor tests below; without `DISPLAY` and their plugin they print
+`SKIPPED` and pass.
 
 ```sh
 sh verify/linux-plugins/build.sh /tmp/lf-plugins
@@ -152,16 +155,23 @@ dialogs on whatever display the scan child has.
 
 Plugin editors on Linux (`src-tauri/src/host/editor_window_linux.rs`): two more ignored tests open
 Surge XT's CLAP and VST3 editors from slot 0 on a private X display. Each must show a window that the
-plugin draws into, take an XTEST drag that moves a parameter the host reads back (VST3: and reaches the
-host as `performEdit`), stay open across a rebuild at 44.1 kHz whose re-activated unit plays a note,
-then take a new drag that moves a parameter and redraw the window for it, close by `CloseEditor` and by
-a `WM_DELETE_WINDOW` sent as a window manager sends it, only after the window advertised it in
-`WM_PROTOCOLS` (arriving as `EditorClosed`), and leave no window behind after either or after an
-unload with it open. These have not run yet: no Xvfb has been available. No window manager runs there; `LF_TEST_SHOTS` keeps a screenshot of each step.
-Surge reads its factory data from `$HOME/.local/share/surge-xt`, so the run gets a temporary HOME:
+plugin draws into, take an XTEST drag that moves exactly one parameter, the host reads it back (VST3:
+it reaches the host as that parameter's `performEdit`) and the plugin redraws the drag's area; stay open
+across a rebuild at 44.1 kHz whose re-activated unit plays a note, where the same drag back must move the
+same parameter again; close by `CloseEditor` and by a `WM_DELETE_WINDOW` sent as a window manager sends
+it, only after the window advertised it in `WM_PROTOCOLS` (arriving as `EditorClosed`), and leave no
+window behind after either or after an unload with it open. Surge XT 1.3.4 passes both (the drag moves
+"A LFO 1 Delay"); `LF_TEST_SHOTS` keeps a screenshot of each step.
+
+No window manager runs on the Xvfb, so the test's own X client stands in for one: it interns the
+ICCCM/EWMH atoms a desktop's window manager has interned long before a plugin loads. JUCE looks them up
+only if they exist, at `gui.create` (before the host window exists), and later sets `WM_PROTOCOLS` on its
+window with the atom it got; on a bare Xvfb that is atom 0, a `BadAtom` that Xlib's default handler ends
+the whole process on. Not a host defect: any desktop session has them. Surge reads its factory data
+from `$HOME/.local/share/surge-xt`, so the run gets a temporary HOME:
 
 ```sh
-Xvfb :93 -screen 0 1600x1000x24 -nolisten tcp &   # the extracted binary, see below
+Xvfb :93 -screen 0 1600x1000x24 -nolisten tcp &
 mkdir -p /tmp/lf-home/.local/share && ln -s "$SURGE/share/surge-xt" /tmp/lf-home/.local/share/
 cd src-tauri && env -u WAYLAND_DISPLAY DISPLAY=:93 HOME=/tmp/lf-home LF_TEST_SHOTS=/tmp/lf-shots \
   LF_TEST_SURGE_CLAP="$SURGE/lib/clap/Surge XT.clap" LF_TEST_SURGE_VST3="$SURGE/lib/vst3/Surge XT.vst3" \
@@ -178,11 +188,12 @@ slot A, whose editor opens with the pick, closes and reopens it with the slot's 
 picks Surge XT (VST3) there; at each open the runner must find the editor window on the display
 (`xprop`: the plugin's name, the host's `WM_CLASS`), check that the window the app logged
 (`editor window 0xâ€¦ open`) is alive, and screenshot the whole display beside `probe.png`; after the
-close by the control and after the unload, that window must be gone (`xprop -id` fails). Xvfb is not installed on the Omarchy PC: without root,
-extract the `xorg-server-xvfb` package into a folder and pass its binary as `XVFB`.
+close by the control and after the unload, that window must be gone (`xprop -id` fails with
+`BadWindow`; any other failure fails the probe). It passes with Surge XT 1.3.4 on the Omarchy PC
+(`/usr/bin/Xvfb`; the app's own GTK window has interned the window manager atoms there).
 
 ```sh
-XVFB=/path/to/Xvfb node verify/linux-app/plugin-probe.mjs src-tauri/target/debug/app /tmp/lf-plugins /tmp/probe.png [SURGE_DIR]
+XVFB=/usr/bin/Xvfb node verify/linux-app/plugin-probe.mjs src-tauri/target/debug/app /tmp/lf-plugins /tmp/probe.png [SURGE_DIR]
 ```
 
 ## Linux AppImage

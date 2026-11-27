@@ -355,6 +355,7 @@ impl LfPlugFrame {
     /// across a call, so a handler may (un)register from inside it.
     fn dispatch_run_loop(&self) {
         use super::super::editor_window::{next_ready, Ready};
+        self.owner.log_refused("IRunLoop");
         while let Some(ready) = next_ready() {
             match ready {
                 Ready::Fd(fd, _) => {
@@ -379,6 +380,7 @@ impl LfPlugFrame {
     /// can unload, nothing of the plugin's is called or held.
     fn forget_run_loop(&self) {
         use super::super::editor_window::{unregister_fd, unregister_timer};
+        self.owner.log_refused("IRunLoop");
         for (fd, _) in self.run_loop.fds.take() {
             unregister_fd(fd);
         }
@@ -393,7 +395,7 @@ impl LfPlugFrame {
 #[cfg(target_os = "linux")]
 impl IRunLoopTrait for LfPlugFrame {
     unsafe fn registerEventHandler(&self, handler: *mut IEventHandler, fd: FileDescriptor) -> tresult {
-        if !self.owner.admits("IRunLoop::registerEventHandler") {
+        if !self.owner.admits() {
             return kResultFalse;
         }
         let Some(handler) = ComRef::from_raw(handler).map(|h| h.to_com_ptr()) else { return kInvalidArgument };
@@ -404,7 +406,7 @@ impl IRunLoopTrait for LfPlugFrame {
         kResultTrue
     }
     unsafe fn unregisterEventHandler(&self, handler: *mut IEventHandler) -> tresult {
-        if !self.owner.admits("IRunLoop::unregisterEventHandler") {
+        if !self.owner.admits() {
             return kResultFalse;
         }
         let gone: Vec<_> = {
@@ -419,7 +421,7 @@ impl IRunLoopTrait for LfPlugFrame {
         if gone.is_empty() { kResultFalse } else { kResultTrue }
     }
     unsafe fn registerTimer(&self, handler: *mut ITimerHandler, milliseconds: TimerInterval) -> tresult {
-        if !self.owner.admits("IRunLoop::registerTimer") {
+        if !self.owner.admits() {
             return kResultFalse;
         }
         let Some(handler) = ComRef::from_raw(handler).map(|h| h.to_com_ptr()) else { return kInvalidArgument };
@@ -428,7 +430,7 @@ impl IRunLoopTrait for LfPlugFrame {
         kResultTrue
     }
     unsafe fn unregisterTimer(&self, handler: *mut ITimerHandler) -> tresult {
-        if !self.owner.admits("IRunLoop::unregisterTimer") {
+        if !self.owner.admits() {
             return kResultFalse;
         }
         let gone: Vec<_> = {
@@ -1199,7 +1201,11 @@ fn vst3_editor_open(controller: &Option<ComPtr<IEditController>>, slot: u8) -> R
             bottom: h as i32,
         };
         let _ = view.onSize(&mut final_rect);
-        show_host_window_front(hwnd);
+        if let Err(e) = show_host_window_front(hwnd) {
+            // Attached: detached first, then `opening` drops the rest in its order.
+            let _ = view.removed();
+            return Err(e);
+        }
         log::info!("[plugin_host] VST3 editor embedded into host window ({w}x{h})");
         Ok(opening.attached())
     }
@@ -1707,29 +1713,45 @@ mod run_loop_owner_tests {
     impl ITimerHandlerTrait for Tick {
         unsafe fn onTimer(&self) {}
     }
+    struct Wake;
+    impl Class for Wake {
+        type Interfaces = (IEventHandler,);
+    }
+    impl IEventHandlerTrait for Wake {
+        unsafe fn onFDIsSet(&self, _fd: FileDescriptor) {}
+    }
 
     /// The frame borrowed into another thread: the very call the frame must refuse.
     struct Elsewhere<'a>(&'a LfPlugFrame);
     // SAFETY: test only; the other thread only calls the refusing entry points.
     unsafe impl Send for Elsewhere<'_> {}
 
+    /// The owner registers a timer and an fd first, so each foreign call has a real target: without
+    /// its guard, an unregister would find and drop the owner's entry, a register would add one.
     #[test]
     fn a_run_loop_call_off_the_owner_thread_is_refused() {
         let frame = LfPlugFrame::new();
-        let tick = ComWrapper::new(Tick);
-        let handler = tick.as_com_ref::<ITimerHandler>().unwrap().as_ptr();
-        let (borrowed, raw) = (Elsewhere(&frame), handler as usize);
+        let (tick, wake) = (ComWrapper::new(Tick), ComWrapper::new(Wake));
+        let timer = tick.as_com_ref::<ITimerHandler>().unwrap().as_ptr();
+        let event = wake.as_com_ref::<IEventHandler>().unwrap().as_ptr();
+        // SAFETY: the owner's own calls, with live handlers (fd 0 is only registered, never polled).
+        unsafe {
+            assert_eq!(frame.registerTimer(timer, 10), kResultTrue, "the owner's timer is taken");
+            assert_eq!(frame.registerEventHandler(event, 0), kResultTrue, "the owner's fd is taken");
+        }
+        assert_eq!(registered(), (1, 1));
+        let (borrowed, raw) = (Elsewhere(&frame), (timer as usize, event as usize));
         let (codes, elsewhere) = std::thread::scope(|s| {
             s.spawn(move || {
                 let frame = { borrowed }.0;
-                let handler = raw as *mut ITimerHandler;
-                // SAFETY: a live handler and a null one: the frame refuses before it reads either.
+                let (timer, event) = (raw.0 as *mut ITimerHandler, raw.1 as *mut IEventHandler);
+                // SAFETY: live handlers; the frame refuses before it reads either.
                 let codes = unsafe {
                     [
-                        frame.registerTimer(handler, 10),
-                        frame.unregisterTimer(handler),
-                        frame.registerEventHandler(std::ptr::null_mut(), 0),
-                        frame.unregisterEventHandler(std::ptr::null_mut()),
+                        frame.unregisterTimer(timer),
+                        frame.unregisterEventHandler(event),
+                        frame.registerTimer(timer, 10),
+                        frame.registerEventHandler(event, 1),
                     ]
                 };
                 (codes, registered())
@@ -1739,10 +1761,9 @@ mod run_loop_owner_tests {
         });
         assert_eq!(codes, [kResultFalse; 4], "every call off the owner thread is refused");
         assert_eq!(elsewhere, (0, 0), "the foreign thread's registry stays empty");
-        assert!(frame.run_loop.timers.borrow().is_empty(), "the frame holds no handler");
-        // SAFETY: the owner's own call, with a live handler.
-        assert_eq!(unsafe { frame.registerTimer(handler, 10) }, kResultTrue, "the owner's call is taken");
-        assert_eq!(registered(), (0, 1));
+        assert_eq!(frame.owner.refused(), 4, "each refusal is counted for the owner to log");
+        assert_eq!((frame.run_loop.fds.borrow().len(), frame.run_loop.timers.borrow().len()), (1, 1), "the frame keeps the owner's two");
+        assert_eq!(registered(), (1, 1), "the owner's registry keeps them too");
         frame.forget_run_loop();
         assert_eq!(registered(), (0, 0));
     }

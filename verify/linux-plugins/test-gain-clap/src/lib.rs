@@ -7,8 +7,13 @@
 //! (`clap.timer-support`) and the read end of a socket pair (`clap.posix-fd-support`); each tick
 //! counts and writes a byte to the pair, each fd callback reads it and counts. The counts are two
 //! more parameters, TICKS (id 8) and FD WAKES (id 9): not flagged read-only (the host lists no such
-//! parameter), and a value the host sets for them is ignored. `destroy` unregisters both and keeps the
-//! plugin's data, marked destroyed: a callback after it aborts the process.
+//! parameter), and a value the host sets for them is ignored. `destroy` unregisters both and frees the
+//! plugin; a run-loop callback for an instance that is gone, or for a timer or fd this instance does
+//! not hold, aborts the process.
+//!
+//! One misbehaviour on purpose: a stored state of the 8 bytes `LEAKREGS` is refused, and the instance
+//! that refused it leaves its timer and fd registered at `destroy` (its socket pair stays open, a byte
+//! pending): what a host must forget itself, since the next instance shares its run loop.
 
 use std::ffi::{c_char, c_void, CStr};
 use std::io::{Read, Write};
@@ -17,6 +22,11 @@ use std::os::unix::net::UnixStream;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
+
+/// The instances alive (their addresses): a run-loop callback for any other aborts.
+static LIVE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+/// The state that is refused and makes its instance leak its registrations.
+const LEAK_STATE: &[u8; 8] = b"LEAKREGS";
 
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{clap_event_header, clap_event_param_value, clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE};
@@ -72,7 +82,8 @@ struct Gain {
     pair: Mutex<Option<(UnixStream, UnixStream)>>,
     ticks: AtomicU64,
     fd_wakes: AtomicU64,
-    destroyed: AtomicBool,
+    /// It refused `LEAK_STATE`: `destroy` leaves its timer and fd registered.
+    leak: AtomicBool,
 }
 
 impl Gain {
@@ -137,36 +148,49 @@ unsafe extern "C" fn init(plugin: *const clap_plugin) -> bool {
 unsafe extern "C" fn destroy(plugin: *const clap_plugin) {
     unsafe {
         let me = Gain::of(plugin);
-        let timer = me.timer.swap(NO_TIMER, Ordering::Relaxed);
-        if timer != NO_TIMER {
-            if let Some(unregister) = host_ext::<clap_host_timer_support>(me.host, CLAP_EXT_TIMER_SUPPORT).and_then(|t| t.unregister_timer) {
-                unregister(me.host, timer);
+        LIVE.lock().unwrap().retain(|&p| p != plugin as usize);
+        let pair = me.pair.lock().unwrap().take();
+        if me.leak.load(Ordering::Relaxed) {
+            // Left registered, the read end readable: only the host's own forgetting keeps either
+            // from calling the instance that comes next.
+            if let Some((read, mut write)) = pair {
+                let _ = write.write(&[1]);
+                std::mem::forget((read, write));
             }
-        }
-        if let Some((read, _)) = me.pair.lock().unwrap().take() {
-            if let Some(unregister) = host_ext::<clap_host_posix_fd_support>(me.host, CLAP_EXT_POSIX_FD_SUPPORT).and_then(|f| f.unregister_fd) {
-                unregister(me.host, read.as_raw_fd());
+        } else {
+            let timer = me.timer.swap(NO_TIMER, Ordering::Relaxed);
+            if timer != NO_TIMER {
+                if let Some(unregister) = host_ext::<clap_host_timer_support>(me.host, CLAP_EXT_TIMER_SUPPORT).and_then(|t| t.unregister_timer) {
+                    unregister(me.host, timer);
+                }
             }
+            if let Some((read, _)) = &pair {
+                if let Some(unregister) = host_ext::<clap_host_posix_fd_support>(me.host, CLAP_EXT_POSIX_FD_SUPPORT).and_then(|f| f.unregister_fd) {
+                    unregister(me.host, read.as_raw_fd());
+                }
+            }
+            drop(pair);
         }
-        // Kept, not freed: a host callback after this must find it marked, never freed memory.
-        me.destroyed.store(true, Ordering::Relaxed);
+        drop(Box::from_raw(plugin as *mut Gain));
     }
 }
 
-/// A run-loop callback: the live plugin, or the process ends (a callback after `destroy`).
-unsafe fn alive<'a>(plugin: *const clap_plugin, what: &str) -> &'a Gain {
-    let me = unsafe { Gain::of(plugin) };
-    if me.destroyed.load(Ordering::Relaxed) {
+/// A run-loop callback's instance, or the process ends: a callback for an instance that is gone
+/// (after its `destroy`) or for a registration it does not hold (`own`).
+unsafe fn alive<'a>(plugin: *const clap_plugin, what: &str, own: impl FnOnce(&Gain) -> bool) -> &'a Gain {
+    if !LIVE.lock().unwrap().contains(&(plugin as usize)) {
         eprintln!("LF Test Gain: {what} after destroy");
+        std::process::abort();
+    }
+    let me = unsafe { Gain::of(plugin) };
+    if !own(me) {
+        eprintln!("LF Test Gain: {what} for a registration this instance does not hold");
         std::process::abort();
     }
     me
 }
 unsafe extern "C" fn on_timer(plugin: *const clap_plugin, timer_id: clap_id) {
-    let me = unsafe { alive(plugin, "on_timer") };
-    if timer_id != me.timer.load(Ordering::Relaxed) {
-        return;
-    }
+    let me = unsafe { alive(plugin, "on_timer", |me| me.timer.load(Ordering::Relaxed) == timer_id) };
     me.ticks.fetch_add(1, Ordering::Relaxed);
     if let Some((_, write)) = me.pair.lock().unwrap().as_mut() {
         let _ = write.write(&[1]);
@@ -174,9 +198,9 @@ unsafe extern "C" fn on_timer(plugin: *const clap_plugin, timer_id: clap_id) {
 }
 static TIMER: clap_plugin_timer_support = clap_plugin_timer_support { on_timer: Some(on_timer) };
 unsafe extern "C" fn on_fd(plugin: *const clap_plugin, fd: i32, flags: clap_posix_fd_flags) {
-    let me = unsafe { alive(plugin, "on_fd") };
+    let me = unsafe { alive(plugin, "on_fd", |me| me.pair.lock().unwrap().as_ref().is_some_and(|(r, _)| r.as_raw_fd() == fd)) };
     let mut pair = me.pair.lock().unwrap();
-    let Some((read, _)) = pair.as_mut().filter(|(r, _)| r.as_raw_fd() == fd) else { return };
+    let Some((read, _)) = pair.as_mut() else { return };
     if flags & CLAP_POSIX_FD_READ != 0 {
         let mut buf = [0u8; 64];
         while read.read(&mut buf).is_ok_and(|n| n > 0) {}
@@ -316,6 +340,10 @@ unsafe extern "C" fn state_load(plugin: *const clap_plugin, stream: *const clap_
             }
             got += n as usize;
         }
+        if &bytes == LEAK_STATE {
+            Gain::of(plugin).leak.store(true, Ordering::Relaxed);
+            return false;
+        }
         Gain::of(plugin).set_gain(f64::from_le_bytes(bytes));
         true
     }
@@ -379,8 +407,9 @@ unsafe extern "C" fn factory_create(_: *const clap_plugin_factory, host: *const 
         pair: Mutex::new(None),
         ticks: AtomicU64::new(0),
         fd_wakes: AtomicU64::new(0),
-        destroyed: AtomicBool::new(false),
+        leak: AtomicBool::new(false),
     }));
+    LIVE.lock().unwrap().push(gain as usize);
     unsafe {
         (*gain).plugin.plugin_data = gain as *mut c_void;
         &(*gain).plugin
