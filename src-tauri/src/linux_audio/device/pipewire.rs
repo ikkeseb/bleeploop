@@ -107,13 +107,23 @@ pub(super) fn webcam_names(text: &str) -> HashSet<String> {
                     forms.push(format!("{app}/{base}"));
                 }
                 if let Some(suffix) = &suffix {
-                    forms.extend(forms.clone().into_iter().map(|f| f + suffix));
+                    // pipewire-jack keeps at most 246 bytes of a taken name before its suffix.
+                    forms.extend(forms.clone().into_iter().map(|f| format!("{}{suffix}", truncated(&f, 246))));
                 }
                 names.extend(forms);
             }
         }
     }
     names
+}
+
+/// `text` cut to at most `bytes` bytes, on a character boundary.
+fn truncated(text: &str, bytes: usize) -> &str {
+    let mut end = text.len().min(bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 #[cfg(test)]
@@ -180,6 +190,16 @@ mod tests {
         assert!(matches!(&failed, Err(e) if e.contains("exited")), "{failed:?}");
         let missing = output(&mut Command::new("lf-no-such-program"), Duration::from_secs(5));
         assert!(matches!(&missing, Err(e) if e.contains("could not start")), "{missing:?}");
+    }
+
+    #[test]
+    fn a_long_taken_name_is_cut_before_its_suffix() {
+        let long = "C".repeat(300);
+        let dump = format!(r#"[{{"id": 7, "type": "PipeWire:Interface:Node", "info": {{"props": {{
+            "node.description": "{long}", "device.form-factor": "webcam"}}}}}}]"#);
+        let names = webcam_names(&dump);
+        assert!(names.contains(&format!("{}-7", "C".repeat(246))), "{names:?}");
+        assert_eq!(truncated("aé", 2), "a", "a character boundary");
     }
 
     #[test]

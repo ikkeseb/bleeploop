@@ -706,13 +706,15 @@ pub(super) struct Placement {
     pub scale: f64,
 }
 
-/// The X monitor a window opens centred on: the first RandR monitor the size of the toolkit's, in
-/// physical or in logical pixels (module doc), else the toolkit's own rectangle.
+/// The X monitor a window opens centred on: the first RandR monitor the size of the toolkit's in
+/// physical pixels (Hyprland's `force_zero_scaling`), else the first of its logical size, else the
+/// toolkit's own rectangle (module doc).
 fn x_monitor(found: &[Rect], p: Placement) -> Rect {
     let m = p.monitor;
     let scale = if p.scale.is_finite() && p.scale > 0.0 { p.scale } else { 1.0 };
     let logical = ((f64::from(m.width) / scale).round() as i32, (f64::from(m.height) / scale).round() as i32);
-    found.iter().copied().find(|x| (x.width, x.height) == (m.width, m.height) || (x.width, x.height) == logical).unwrap_or(m)
+    let sized = |size: (i32, i32)| found.iter().copied().find(|x| (x.width, x.height) == size);
+    sized((m.width, m.height)).or_else(|| sized(logical)).unwrap_or(m)
 }
 
 /// The monitor the next editor window opens centred on (module doc), set by the open command. One
@@ -1050,6 +1052,9 @@ mod tests {
         assert_eq!(x_monitor(&x, Placement { monitor: scaled, scale: 2.0 }), x[1], "logical size without zero scaling");
         assert_eq!(x_monitor(&x, Placement { monitor: scaled, scale: 1.0 }), scaled, "no such monitor: the toolkit's own");
         assert_eq!(x_monitor(&[], Placement { monitor: above, scale: f64::NAN }), above, "no RandR answer");
+        // Mixed scales under zero scaling: a 1920x1080 at 1x listed before the 3840x2160 at 2x.
+        let mixed = [Rect { x: 0, y: 0, width: 1920, height: 1080 }, Rect { x: 1920, y: 0, width: 3840, height: 2160 }];
+        assert_eq!(x_monitor(&mixed, Placement { monitor: scaled, scale: 2.0 }), mixed[1], "physical size first");
     }
 
     /// On a private X server only (`env -u WAYLAND_DISPLAY DISPLAY=:9x`, an Xvfb at 1920x1080: its
@@ -1079,6 +1084,8 @@ mod tests {
         assert_eq!(place("at creation"), (560, 240, 800, 600));
         // The plugin resizes as it attaches, before the window is shown: centred again.
         assert_eq!(set_client_size(win.hwnd, 1141, 711), Some((1141, 711)));
+        // A round trip on the window's own connection: the resize is applied before the read.
+        with_owner(|o| o.display.as_ref().map(|d| d.conn.get_input_focus().unwrap().reply().unwrap()));
         assert_eq!(place("after the resize"), (389, 184, 1141, 711));
         drop(win);
     }
