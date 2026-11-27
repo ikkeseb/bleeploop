@@ -452,6 +452,8 @@ fn load(
         // The plugin may have taken part of the tone before it refused: a fresh instance is at the
         // defaults the player is told it loaded with.
         drop(instance);
+        #[cfg(target_os = "linux")]
+        super::super::editor_window::forget_registrations();
         instance = instantiate(&entry, id, &editor_closed, &hosted_hwnd)?.0;
         deliver_plugin_callback(&mut instance);
     }
@@ -567,6 +569,10 @@ impl OwnedPlugin for Clap {
         if closed {
             self.editor_close();
         }
+        // Linux: the plugin's timers and fds the pump found due (an X11 editor draws through them),
+        // after a closed editor is torn down: a window destroyed under its owner gets no repaint.
+        #[cfg(target_os = "linux")]
+        dispatch_run_loop(&mut self.instance);
         closed
     }
 
@@ -612,6 +618,9 @@ impl OwnedPlugin for Clap {
             None => {}
         }
         drop(instance);
+        // Linux: what the plugin left registered is never called back.
+        #[cfg(target_os = "linux")]
+        super::super::editor_window::forget_registrations();
         drop(entry);
     }
 }

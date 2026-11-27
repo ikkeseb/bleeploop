@@ -631,6 +631,12 @@ impl OwnedPlugin for Vst3 {
         if closed {
             vst3_editor_close(&mut self.editor);
         }
+        // Linux: the view's run-loop fds and timers the pump found due (its X11 GUI draws through
+        // them), only for a view still open: a window destroyed under its owner gets no repaint.
+        #[cfg(target_os = "linux")]
+        if let Vst3Editor::Open { _frame, .. } = &self.editor {
+            _frame.dispatch_run_loop();
+        }
         closed
     }
 

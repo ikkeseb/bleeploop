@@ -55,6 +55,17 @@ use windows::Win32::Foundation::{FreeLibrary, HMODULE, HWND};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 #[cfg(target_os = "linux")]
 use super::super::editor_window::HWND;
+#[cfg(target_os = "linux")]
+use vst3::Steinberg::Linux::{
+    FileDescriptor, IEventHandler, IEventHandlerTrait, IRunLoop, IRunLoopTrait, ITimerHandler, ITimerHandlerTrait,
+    TimerInterval,
+};
+
+/// The window system a view attaches to: an HWND on Windows, an X11 window id on Linux.
+#[cfg(windows)]
+const VIEW_PLATFORM: (FIDString, &str) = (kPlatformTypeHWND, "HWND");
+#[cfg(target_os = "linux")]
+const VIEW_PLATFORM: (FIDString, &str) = (vst3::Steinberg::kPlatformTypeX11EmbedWindowID, "X11");
 
 // ── host-implemented COM objects (the callbacks the plugin holds) ──────────────────────────
 
@@ -297,18 +308,142 @@ impl IMessageTrait for LfMessage {
 /// outlive the attached view — kept in `Vst3Editor::Open`). `hwnd` is the host window the view is
 /// attached to, 0 until `vst3_editor_open` has created it (the frame is handed to the plugin
 /// BEFORE the window exists, step 4 vs 6) — a resize that arrives in that gap is refused.
+///
+/// On Linux the frame is also the view's `IRunLoop` (found by `queryInterface` on the frame, as the
+/// SDK says): the handlers it registers are kept here and called back from the owner's turn
+/// (`dispatch_run_loop`); `forget_run_loop` drops them after `removed()`, so none is called after it.
 struct LfPlugFrame {
     hwnd: AtomicIsize,
+    #[cfg(target_os = "linux")]
+    run_loop: RunLoopHandlers,
+    /// The thread that made the frame (the owner): the only one whose `IRunLoop` calls are taken.
+    #[cfg(target_os = "linux")]
+    owner: super::super::editor_window::OwnerThread,
 }
 impl LfPlugFrame {
     fn new() -> Self {
         Self {
             hwnd: AtomicIsize::new(0),
+            #[cfg(target_os = "linux")]
+            run_loop: RunLoopHandlers::default(),
+            #[cfg(target_os = "linux")]
+            owner: Default::default(),
         }
     }
 }
+#[cfg(windows)]
 impl Class for LfPlugFrame {
     type Interfaces = (IPlugFrame,);
+}
+#[cfg(target_os = "linux")]
+impl Class for LfPlugFrame {
+    type Interfaces = (IPlugFrame, IRunLoop);
+}
+
+/// The handlers a view registered on the frame's `IRunLoop`, each with its fd or the owner registry's
+/// timer id (`editor_window_linux.rs`). Owner-thread only; each entry holds a reference on its handler.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct RunLoopHandlers {
+    fds: RefCell<Vec<(FileDescriptor, ComPtr<IEventHandler>)>>,
+    timers: RefCell<Vec<(u32, ComPtr<ITimerHandler>)>>,
+}
+
+#[cfg(target_os = "linux")]
+impl LfPlugFrame {
+    /// Owner turn: call back each handler whose fd or timer the pump found due. No borrow is held
+    /// across a call, so a handler may (un)register from inside it.
+    fn dispatch_run_loop(&self) {
+        use super::super::editor_window::{next_ready, Ready};
+        self.owner.log_refused("IRunLoop");
+        while let Some(ready) = next_ready() {
+            match ready {
+                Ready::Fd(fd, _) => {
+                    let handler = self.run_loop.fds.borrow().iter().find(|(f, _)| *f == fd).map(|(_, h)| h.clone());
+                    if let Some(handler) = handler {
+                        // SAFETY: owner thread; the handler is alive (we hold a reference).
+                        unsafe { handler.onFDIsSet(fd) };
+                    }
+                }
+                Ready::Timer(id) => {
+                    let handler = self.run_loop.timers.borrow().iter().find(|(t, _)| *t == id).map(|(_, h)| h.clone());
+                    if let Some(handler) = handler {
+                        // SAFETY: as above.
+                        unsafe { handler.onTimer() };
+                    }
+                }
+            }
+        }
+    }
+
+    /// Unregister and release every handler the view left: after `removed()`, and before the module
+    /// can unload, nothing of the plugin's is called or held.
+    fn forget_run_loop(&self) {
+        use super::super::editor_window::{unregister_fd, unregister_timer};
+        self.owner.log_refused("IRunLoop");
+        for (fd, _) in self.run_loop.fds.take() {
+            unregister_fd(fd);
+        }
+        for (id, _) in self.run_loop.timers.take() {
+            unregister_timer(id);
+        }
+    }
+}
+
+/// Steinberg's Linux run loop for a view's GUI: its fds and timers join the owner's `poll()`. A call
+/// off the owner thread is refused with `kResultFalse` before it touches anything (`OwnerThread`).
+#[cfg(target_os = "linux")]
+impl IRunLoopTrait for LfPlugFrame {
+    unsafe fn registerEventHandler(&self, handler: *mut IEventHandler, fd: FileDescriptor) -> tresult {
+        if !self.owner.admits() {
+            return kResultFalse;
+        }
+        let Some(handler) = ComRef::from_raw(handler).map(|h| h.to_com_ptr()) else { return kInvalidArgument };
+        if !super::super::editor_window::register_fd(fd, super::super::editor_window::FD_READ) {
+            return kResultFalse;
+        }
+        self.run_loop.fds.borrow_mut().push((fd, handler));
+        kResultTrue
+    }
+    unsafe fn unregisterEventHandler(&self, handler: *mut IEventHandler) -> tresult {
+        if !self.owner.admits() {
+            return kResultFalse;
+        }
+        let gone: Vec<_> = {
+            let mut fds = self.run_loop.fds.borrow_mut();
+            let (gone, kept) = fds.drain(..).partition(|(_, h)| h.as_ptr() == handler);
+            *fds = kept;
+            gone
+        };
+        for (fd, _) in &gone {
+            super::super::editor_window::unregister_fd(*fd);
+        }
+        if gone.is_empty() { kResultFalse } else { kResultTrue }
+    }
+    unsafe fn registerTimer(&self, handler: *mut ITimerHandler, milliseconds: TimerInterval) -> tresult {
+        if !self.owner.admits() {
+            return kResultFalse;
+        }
+        let Some(handler) = ComRef::from_raw(handler).map(|h| h.to_com_ptr()) else { return kInvalidArgument };
+        let id = super::super::editor_window::register_timer(u32::try_from(milliseconds).unwrap_or(u32::MAX));
+        self.run_loop.timers.borrow_mut().push((id, handler));
+        kResultTrue
+    }
+    unsafe fn unregisterTimer(&self, handler: *mut ITimerHandler) -> tresult {
+        if !self.owner.admits() {
+            return kResultFalse;
+        }
+        let gone: Vec<_> = {
+            let mut timers = self.run_loop.timers.borrow_mut();
+            let (gone, kept) = timers.drain(..).partition(|(_, h)| h.as_ptr() == handler);
+            *timers = kept;
+            gone
+        };
+        for (id, _) in &gone {
+            super::super::editor_window::unregister_timer(*id);
+        }
+        if gone.is_empty() { kResultFalse } else { kResultTrue }
+    }
 }
 impl IPlugFrameTrait for LfPlugFrame {
     /// The plugin's editor wants a new size (its own size menu, a zoom step, a preset with another
@@ -994,6 +1129,10 @@ impl Drop for OpeningEditor {
             }
             drop(view);
         }
+        #[cfg(target_os = "linux")]
+        if let Some(frame) = self.frame.as_ref() {
+            frame.forget_run_loop();
+        }
         drop(self.frame.take());
         drop(self.win.take());
     }
@@ -1019,8 +1158,8 @@ fn vst3_editor_open(controller: &Option<ComPtr<IEditController>>, slot: u8) -> R
             .ok_or_else(|| "createView returned null (plugin has no editor)".to_string())?;
         log::info!("[plugin_host] vst3 editor_open slot {slot}: createView ok");
         // 3. Must support HWND embedding. kResultTrue == kResultOk == 0 on Windows.
-        if view.isPlatformTypeSupported(kPlatformTypeHWND) != kResultTrue {
-            return Err("VST3 view does not support HWND embedding".to_string());
+        if view.isPlatformTypeSupported(VIEW_PLATFORM.0) != kResultTrue {
+            return Err(format!("VST3 view does not support {} embedding", VIEW_PLATFORM.1));
         }
         // From here every early return drops the editor in its own order (`OpeningEditor`). It
         // holds the view's last reference: the local below is declared after it, so drops first.
@@ -1047,7 +1186,7 @@ fn vst3_editor_open(controller: &Option<ComPtr<IEditController>>, slot: u8) -> R
         frame.hwnd.store(hwnd.0 as isize, Release);
         // 7. Attach the plugin view into our window. windows-crate HWND.0 is already *mut c_void.
         log::info!("[plugin_host] vst3 editor_open slot {slot}: attached…");
-        if view.attached(hwnd.0 as *mut c_void, kPlatformTypeHWND) != kResultOk {
+        if view.attached(hwnd.0 as *mut c_void, VIEW_PLATFORM.0) != kResultOk {
             return Err("IPlugView::attached failed".to_string());
         }
         // 8. Tell the plugin the final size, then show our window. The size is read back from the
@@ -1062,7 +1201,11 @@ fn vst3_editor_open(controller: &Option<ComPtr<IEditController>>, slot: u8) -> R
             bottom: h as i32,
         };
         let _ = view.onSize(&mut final_rect);
-        show_host_window_front(hwnd);
+        if let Err(e) = show_host_window_front(hwnd) {
+            // Attached: detached first, then `opening` drops the rest in its order.
+            let _ = view.removed();
+            return Err(e);
+        }
         log::info!("[plugin_host] VST3 editor embedded into host window ({w}x{h})");
         Ok(opening.attached())
     }
@@ -1072,11 +1215,13 @@ fn vst3_editor_open(controller: &Option<ComPtr<IEditController>>, slot: u8) -> R
 /// the view is still live), THEN the drop runs view-release → frame-release →
 /// `HostWindow::drop` (DestroyWindow). Mirrors the CLAP `gui.destroy` → DestroyWindow order.
 fn vst3_editor_close(ed: &mut Vst3Editor) {
-    if let Vst3Editor::Open { view, .. } = ed {
+    if let Vst3Editor::Open { view, _frame, .. } = ed {
         // SAFETY: owner thread; detach the plugin's child before our window is destroyed.
         unsafe {
             let _ = view.removed();
         }
+        #[cfg(target_os = "linux")]
+        _frame.forget_run_loop();
     }
     *ed = Vst3Editor::Closed; // drops view/frame then HostWindow::drop → DestroyWindow
     // Pump the WM_DESTROY/NCDESTROY + JUCE-posted teardown messages on THIS owner thread before
@@ -1551,5 +1696,75 @@ mod param_drain_tests {
         assert_eq!(first[7], (7, value(7)), "the change behind it waits");
         assert_eq!(block(&mut ring, &changes), vec![(new, value(new)), (5, 0.25), (7, 0.75)], "next block, in order");
         assert!(ring.is_empty());
+    }
+}
+
+/// The frame's `IRunLoop` refuses a call off the thread that made it, and leaves the frame's
+/// handlers and both threads' registries as they were.
+#[cfg(all(test, target_os = "linux"))]
+mod run_loop_owner_tests {
+    use super::super::super::editor_window::registered;
+    use super::*;
+
+    struct Tick;
+    impl Class for Tick {
+        type Interfaces = (ITimerHandler,);
+    }
+    impl ITimerHandlerTrait for Tick {
+        unsafe fn onTimer(&self) {}
+    }
+    struct Wake;
+    impl Class for Wake {
+        type Interfaces = (IEventHandler,);
+    }
+    impl IEventHandlerTrait for Wake {
+        unsafe fn onFDIsSet(&self, _fd: FileDescriptor) {}
+    }
+
+    /// The frame borrowed into another thread: the very call the frame must refuse.
+    struct Elsewhere<'a>(&'a LfPlugFrame);
+    // SAFETY: test only; the other thread only calls the refusing entry points.
+    unsafe impl Send for Elsewhere<'_> {}
+
+    /// The owner registers a timer and an fd first, so each foreign call has a real target: without
+    /// its guard, an unregister would find and drop the owner's entry, a register would add one.
+    #[test]
+    fn a_run_loop_call_off_the_owner_thread_is_refused() {
+        let frame = LfPlugFrame::new();
+        let (tick, wake) = (ComWrapper::new(Tick), ComWrapper::new(Wake));
+        let timer = tick.as_com_ref::<ITimerHandler>().unwrap().as_ptr();
+        let event = wake.as_com_ref::<IEventHandler>().unwrap().as_ptr();
+        // SAFETY: the owner's own calls, with live handlers (fd 0 is only registered, never polled).
+        unsafe {
+            assert_eq!(frame.registerTimer(timer, 10), kResultTrue, "the owner's timer is taken");
+            assert_eq!(frame.registerEventHandler(event, 0), kResultTrue, "the owner's fd is taken");
+        }
+        assert_eq!(registered(), (1, 1));
+        let (borrowed, raw) = (Elsewhere(&frame), (timer as usize, event as usize));
+        let (codes, elsewhere) = std::thread::scope(|s| {
+            s.spawn(move || {
+                let frame = { borrowed }.0;
+                let (timer, event) = (raw.0 as *mut ITimerHandler, raw.1 as *mut IEventHandler);
+                // SAFETY: live handlers; the frame refuses before it reads either.
+                let codes = unsafe {
+                    [
+                        frame.unregisterTimer(timer),
+                        frame.unregisterEventHandler(event),
+                        frame.registerTimer(timer, 10),
+                        frame.registerEventHandler(event, 1),
+                    ]
+                };
+                (codes, registered())
+            })
+            .join()
+            .unwrap()
+        });
+        assert_eq!(codes, [kResultFalse; 4], "every call off the owner thread is refused");
+        assert_eq!(elsewhere, (0, 0), "the foreign thread's registry stays empty");
+        assert_eq!(frame.owner.refused(), 4, "each refusal is counted for the owner to log");
+        assert_eq!((frame.run_loop.fds.borrow().len(), frame.run_loop.timers.borrow().len()), (1, 1), "the frame keeps the owner's two");
+        assert_eq!(registered(), (1, 1), "the owner's registry keeps them too");
+        frame.forget_run_loop();
+        assert_eq!(registered(), (0, 0));
     }
 }

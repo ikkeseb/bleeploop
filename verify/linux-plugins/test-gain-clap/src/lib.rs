@@ -2,15 +2,38 @@
 //! host that indexes instead of using ids is caught), 0..2, default 0.5; its state is that value as 8
 //! little-endian bytes. Every sample it writes depends on its input, so a host check that compares a
 //! render with and without it fails when the plugin is not in the path.
+//!
+//! It also drives the host's run loop with no editor open: at `init` it registers a 10 ms timer
+//! (`clap.timer-support`) and the read end of a socket pair (`clap.posix-fd-support`); each tick
+//! counts and writes a byte to the pair, each fd callback reads it and counts. The counts are two
+//! more parameters, TICKS (id 8) and FD WAKES (id 9): not flagged read-only (the host lists no such
+//! parameter), and a value the host sets for them is ignored. `destroy` unregisters both and frees the
+//! plugin; a run-loop callback for an instance that is gone, or for a timer or fd this instance does
+//! not hold, aborts the process.
+//!
+//! One misbehaviour on purpose: a stored state of the 8 bytes `LEAKREGS` is refused, and the instance
+//! that refused it leaves its timer and fd registered at `destroy` (its socket pair stays open, a byte
+//! pending): what a host must forget itself, since the next instance shares its run loop.
 
 use std::ffi::{c_char, c_void, CStr};
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Mutex;
+
+/// The instances alive (their addresses): a run-loop callback for any other aborts.
+static LIVE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+/// The state that is refused and makes its instance leak its registrations.
+const LEAK_STATE: &[u8; 8] = b"LEAKREGS";
 
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{clap_event_header, clap_event_param_value, clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE};
 use clap_sys::ext::audio_ports::{clap_audio_port_info, clap_plugin_audio_ports, CLAP_AUDIO_PORT_IS_MAIN, CLAP_EXT_AUDIO_PORTS, CLAP_PORT_STEREO};
 use clap_sys::ext::params::{clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE};
+use clap_sys::ext::posix_fd_support::{clap_host_posix_fd_support, clap_plugin_posix_fd_support, clap_posix_fd_flags, CLAP_EXT_POSIX_FD_SUPPORT, CLAP_POSIX_FD_READ};
+use clap_sys::ext::timer_support::{clap_host_timer_support, clap_plugin_timer_support, CLAP_EXT_TIMER_SUPPORT};
 use clap_sys::ext::state::{clap_plugin_state, CLAP_EXT_STATE};
 use clap_sys::factory::plugin_factory::{clap_plugin_factory, CLAP_PLUGIN_FACTORY_ID};
 use clap_sys::host::clap_host;
@@ -24,6 +47,10 @@ use clap_sys::version::CLAP_VERSION;
 const PLUGIN_ID: &CStr = c"dev.bleeploop.test-gain";
 const GAIN_ID: clap_id = 7;
 const GAIN_DEFAULT: f64 = 0.5;
+const TICKS_ID: clap_id = 8;
+const FD_WAKES_ID: clap_id = 9;
+const TIMER_MS: u32 = 10;
+const NO_TIMER: u32 = u32::MAX;
 
 struct Features([*const c_char; 3]);
 unsafe impl Sync for Features {}
@@ -48,6 +75,15 @@ struct Gain {
     plugin: clap_plugin,
     /// GAIN as f64 bits: the main thread (params flush, state) and the audio thread both touch it.
     gain: AtomicU64,
+    host: *const clap_host,
+    /// The registered timer's id, `NO_TIMER` for none.
+    timer: AtomicU32,
+    /// The socket pair whose read end is registered: (read, write).
+    pair: Mutex<Option<(UnixStream, UnixStream)>>,
+    ticks: AtomicU64,
+    fd_wakes: AtomicU64,
+    /// It refused `LEAK_STATE`: `destroy` leaves its timer and fd registered.
+    leak: AtomicBool,
 }
 
 impl Gain {
@@ -80,12 +116,98 @@ impl Gain {
     }
 }
 
-unsafe extern "C" fn init(_: *const clap_plugin) -> bool {
+/// The host's extension `id`, if it has it.
+unsafe fn host_ext<T>(host: *const clap_host, id: &CStr) -> Option<&'static T> {
+    unsafe {
+        let ext = ((*host).get_extension?)(host, id.as_ptr()) as *const T;
+        ext.as_ref()
+    }
+}
+
+unsafe extern "C" fn init(plugin: *const clap_plugin) -> bool {
+    unsafe {
+        let me = Gain::of(plugin);
+        if let Some(timers) = host_ext::<clap_host_timer_support>(me.host, CLAP_EXT_TIMER_SUPPORT) {
+            let mut id = NO_TIMER;
+            if timers.register_timer.is_some_and(|register| register(me.host, TIMER_MS, &mut id)) {
+                me.timer.store(id, Ordering::Relaxed);
+            }
+        }
+        if let Some(fds) = host_ext::<clap_host_posix_fd_support>(me.host, CLAP_EXT_POSIX_FD_SUPPORT) {
+            if let Ok((read, write)) = UnixStream::pair() {
+                let _ = read.set_nonblocking(true);
+                let _ = write.set_nonblocking(true);
+                if fds.register_fd.is_some_and(|register| register(me.host, read.as_raw_fd(), CLAP_POSIX_FD_READ)) {
+                    *me.pair.lock().unwrap() = Some((read, write));
+                }
+            }
+        }
+    }
     true
 }
 unsafe extern "C" fn destroy(plugin: *const clap_plugin) {
-    unsafe { drop(Box::from_raw((*plugin).plugin_data as *mut Gain)) }
+    unsafe {
+        let me = Gain::of(plugin);
+        LIVE.lock().unwrap().retain(|&p| p != plugin as usize);
+        let pair = me.pair.lock().unwrap().take();
+        if me.leak.load(Ordering::Relaxed) {
+            // Left registered, the read end readable: only the host's own forgetting keeps either
+            // from calling the instance that comes next.
+            if let Some((read, mut write)) = pair {
+                let _ = write.write(&[1]);
+                std::mem::forget((read, write));
+            }
+        } else {
+            let timer = me.timer.swap(NO_TIMER, Ordering::Relaxed);
+            if timer != NO_TIMER {
+                if let Some(unregister) = host_ext::<clap_host_timer_support>(me.host, CLAP_EXT_TIMER_SUPPORT).and_then(|t| t.unregister_timer) {
+                    unregister(me.host, timer);
+                }
+            }
+            if let Some((read, _)) = &pair {
+                if let Some(unregister) = host_ext::<clap_host_posix_fd_support>(me.host, CLAP_EXT_POSIX_FD_SUPPORT).and_then(|f| f.unregister_fd) {
+                    unregister(me.host, read.as_raw_fd());
+                }
+            }
+            drop(pair);
+        }
+        drop(Box::from_raw(plugin as *mut Gain));
+    }
 }
+
+/// A run-loop callback's instance, or the process ends: a callback for an instance that is gone
+/// (after its `destroy`) or for a registration it does not hold (`own`).
+unsafe fn alive<'a>(plugin: *const clap_plugin, what: &str, own: impl FnOnce(&Gain) -> bool) -> &'a Gain {
+    if !LIVE.lock().unwrap().contains(&(plugin as usize)) {
+        eprintln!("LF Test Gain: {what} after destroy");
+        std::process::abort();
+    }
+    let me = unsafe { Gain::of(plugin) };
+    if !own(me) {
+        eprintln!("LF Test Gain: {what} for a registration this instance does not hold");
+        std::process::abort();
+    }
+    me
+}
+unsafe extern "C" fn on_timer(plugin: *const clap_plugin, timer_id: clap_id) {
+    let me = unsafe { alive(plugin, "on_timer", |me| me.timer.load(Ordering::Relaxed) == timer_id) };
+    me.ticks.fetch_add(1, Ordering::Relaxed);
+    if let Some((_, write)) = me.pair.lock().unwrap().as_mut() {
+        let _ = write.write(&[1]);
+    }
+}
+static TIMER: clap_plugin_timer_support = clap_plugin_timer_support { on_timer: Some(on_timer) };
+unsafe extern "C" fn on_fd(plugin: *const clap_plugin, fd: i32, flags: clap_posix_fd_flags) {
+    let me = unsafe { alive(plugin, "on_fd", |me| me.pair.lock().unwrap().as_ref().is_some_and(|(r, _)| r.as_raw_fd() == fd)) };
+    let mut pair = me.pair.lock().unwrap();
+    let Some((read, _)) = pair.as_mut() else { return };
+    if flags & CLAP_POSIX_FD_READ != 0 {
+        let mut buf = [0u8; 64];
+        while read.read(&mut buf).is_ok_and(|n| n > 0) {}
+        me.fd_wakes.fetch_add(1, Ordering::Relaxed);
+    }
+}
+static FD: clap_plugin_posix_fd_support = clap_plugin_posix_fd_support { on_fd: Some(on_fd) };
 unsafe extern "C" fn activate(_: *const clap_plugin, _: f64, _: u32, _: u32) -> bool {
     true
 }
@@ -141,30 +263,37 @@ unsafe extern "C" fn ports_get(_: *const clap_plugin, index: u32, is_input: bool
 static AUDIO_PORTS: clap_plugin_audio_ports = clap_plugin_audio_ports { count: Some(ports_count), get: Some(ports_get) };
 
 unsafe extern "C" fn params_count(_: *const clap_plugin) -> u32 {
-    1
+    3
 }
 unsafe extern "C" fn params_info(_: *const clap_plugin, index: u32, info: *mut clap_param_info) -> bool {
-    if index != 0 {
-        return false;
-    }
+    let (id, name, flags, max, default) = match index {
+        0 => (GAIN_ID, c"Gain", CLAP_PARAM_IS_AUTOMATABLE, 2.0, GAIN_DEFAULT),
+        1 => (TICKS_ID, c"Ticks", 0, 1e9, 0.0),
+        2 => (FD_WAKES_ID, c"Fd wakes", 0, 1e9, 0.0),
+        _ => return false,
+    };
     unsafe {
         let info = &mut *info;
-        info.id = GAIN_ID;
-        info.flags = CLAP_PARAM_IS_AUTOMATABLE;
+        info.id = id;
+        info.flags = flags;
         info.cookie = ptr::null_mut();
-        write_name(&mut info.name, c"Gain");
+        write_name(&mut info.name, name);
         write_name(&mut info.module, c"");
         info.min_value = 0.0;
-        info.max_value = 2.0;
-        info.default_value = GAIN_DEFAULT;
+        info.max_value = max;
+        info.default_value = default;
     }
     true
 }
 unsafe extern "C" fn params_value(plugin: *const clap_plugin, id: clap_id, value: *mut f64) -> bool {
-    if id != GAIN_ID {
-        return false;
-    }
-    unsafe { *value = Gain::of(plugin).gain() };
+    let me = unsafe { Gain::of(plugin) };
+    let got = match id {
+        GAIN_ID => me.gain(),
+        TICKS_ID => me.ticks.load(Ordering::Relaxed) as f64,
+        FD_WAKES_ID => me.fd_wakes.load(Ordering::Relaxed) as f64,
+        _ => return false,
+    };
+    unsafe { *value = got };
     true
 }
 unsafe extern "C" fn params_to_text(_: *const clap_plugin, _: clap_id, value: f64, out: *mut c_char, size: u32) -> bool {
@@ -211,6 +340,10 @@ unsafe extern "C" fn state_load(plugin: *const clap_plugin, stream: *const clap_
             }
             got += n as usize;
         }
+        if &bytes == LEAK_STATE {
+            Gain::of(plugin).leak.store(true, Ordering::Relaxed);
+            return false;
+        }
         Gain::of(plugin).set_gain(f64::from_le_bytes(bytes));
         true
     }
@@ -225,6 +358,10 @@ unsafe extern "C" fn get_extension(_: *const clap_plugin, id: *const c_char) -> 
         &PARAMS as *const _ as *const c_void
     } else if id == CLAP_EXT_STATE {
         &STATE as *const _ as *const c_void
+    } else if id == CLAP_EXT_TIMER_SUPPORT {
+        &TIMER as *const _ as *const c_void
+    } else if id == CLAP_EXT_POSIX_FD_SUPPORT {
+        &FD as *const _ as *const c_void
     } else {
         ptr::null()
     }
@@ -245,7 +382,7 @@ unsafe extern "C" fn factory_count(_: *const clap_plugin_factory) -> u32 {
 unsafe extern "C" fn factory_descriptor(_: *const clap_plugin_factory, index: u32) -> *const clap_plugin_descriptor {
     if index == 0 { &DESCRIPTOR } else { ptr::null() }
 }
-unsafe extern "C" fn factory_create(_: *const clap_plugin_factory, _host: *const clap_host, id: *const c_char) -> *const clap_plugin {
+unsafe extern "C" fn factory_create(_: *const clap_plugin_factory, host: *const clap_host, id: *const c_char) -> *const clap_plugin {
     if unsafe { CStr::from_ptr(id) } != PLUGIN_ID {
         return ptr::null();
     }
@@ -265,7 +402,14 @@ unsafe extern "C" fn factory_create(_: *const clap_plugin_factory, _host: *const
             on_main_thread: Some(on_main_thread),
         },
         gain: AtomicU64::new(GAIN_DEFAULT.to_bits()),
+        host,
+        timer: AtomicU32::new(NO_TIMER),
+        pair: Mutex::new(None),
+        ticks: AtomicU64::new(0),
+        fd_wakes: AtomicU64::new(0),
+        leak: AtomicBool::new(false),
     }));
+    LIVE.lock().unwrap().push(gain as usize);
     unsafe {
         (*gain).plugin.plugin_data = gain as *mut c_void;
         &(*gain).plugin

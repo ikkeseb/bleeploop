@@ -219,7 +219,8 @@ pub(super) fn set_client_size(hwnd: HWND, width: u32, height: u32) -> Option<(u3
 /// fall behind the app later when you click back into it — the intended, non-pinned behaviour.
 /// The app process owns the foreground at open (the user just clicked the in-app editor control),
 /// so the cross-thread `SetForegroundWindow` is permitted.
-pub(super) fn show_host_window_front(hwnd: HWND) {
+/// Never fails on Windows; the `Result` is the Linux twin's (a map the X server refused).
+pub(super) fn show_host_window_front(hwnd: HWND) -> Result<(), String> {
     // SAFETY: showing/raising our own freshly-created top-level window on the owner thread.
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
@@ -236,6 +237,7 @@ pub(super) fn show_host_window_front(hwnd: HWND) {
         );
         let _ = SetForegroundWindow(hwnd);
     }
+    Ok(())
 }
 
 /// The most one `pump_thread_messages` call dispatches: a plugin whose messages keep posting more (a

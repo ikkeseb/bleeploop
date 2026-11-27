@@ -44,6 +44,26 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 #[cfg(target_os = "linux")]
 use super::editor_window::{GetCurrentThreadId, GetWindowThreadProcessId, HWND};
+#[cfg(target_os = "linux")]
+use clack_extensions::posix_fd::{FdFlags, HostPosixFd, HostPosixFdImpl, PluginPosixFd};
+#[cfg(target_os = "linux")]
+use clack_extensions::timer::{HostTimer, HostTimerImpl, PluginTimer, TimerId};
+
+/// The window system a hosted editor embeds into: Win32 on Windows, X11 on Linux (`editor_window_linux.rs`).
+#[cfg(windows)]
+const EDITOR_API: GuiApiType<'static> = GuiApiType::WIN32;
+#[cfg(target_os = "linux")]
+const EDITOR_API: GuiApiType<'static> = GuiApiType::X11;
+
+/// The host window as the parent a CLAP `set_parent` takes.
+#[cfg(windows)]
+fn editor_parent_window(hwnd: HWND) -> Window<'static> {
+    Window::from_win32_hwnd(hwnd.0 as *mut core::ffi::c_void)
+}
+#[cfg(target_os = "linux")]
+fn editor_parent_window(hwnd: HWND) -> Window<'static> {
+    Window::from_x11_handle(hwnd.0 as usize as core::ffi::c_ulong)
+}
 
 // ---- P9.5 control plane: main→audio event ring + main→owner state requests -----------------
 
@@ -234,7 +254,8 @@ enum EditorSlot {
 /// P10.0 owner-thread: open the slot's plugin editor. Tries a plugin-owned FLOATING window first
 /// (no host window / pump needed — the plugin self-manages it); if the plugin doesn't support a
 /// WIN32 floating GUI (e.g. JUCE plugins like Surge XT), falls back to EMBEDDED into a host-owned
-/// top-level window. `host_hwnd` (0 = unknown) is the main window: a floating editor's transient
+/// top-level window. Linux embeds only (X11), into `editor_window_linux.rs`'s window, whose owner
+/// loop runs the plugin's fds and timers. `host_hwnd` (0 = unknown) is the main window: a floating editor's transient
 /// parent (the hosted path's window is owner-less).
 fn editor_open(
     instance: &mut PluginInstance<LfHost>,
@@ -251,7 +272,7 @@ fn editor_open(
         api_type: GuiApiType::WIN32,
         is_floating: true,
     };
-    if gui.is_api_supported(&mut handle, floating) {
+    if cfg!(windows) && gui.is_api_supported(&mut handle, floating) {
         gui.create(&mut handle, floating)
             .map_err(|e| format!("gui.create(floating): {e}"))?;
         if host_hwnd != 0 {
@@ -277,11 +298,14 @@ fn editor_open(
 
     // 2. Fallback: embed into a host-owned top-level window.
     let embedded = GuiConfiguration {
-        api_type: GuiApiType::WIN32,
+        api_type: EDITOR_API,
         is_floating: false,
     };
     if !gui.is_api_supported(&mut handle, embedded) {
+        #[cfg(windows)]
         return Err("plugin supports neither WIN32 floating nor embedded GUI".to_string());
+        #[cfg(target_os = "linux")]
+        return Err("plugin has no embedded X11 GUI".to_string());
     }
     gui.create(&mut handle, embedded)
         .map_err(|e| format!("gui.create(embedded): {e}"))?;
@@ -301,7 +325,7 @@ fn editor_open(
             return Err(e);
         }
     };
-    let parent = Window::from_win32_hwnd(host_win.hwnd.0 as *mut core::ffi::c_void);
+    let parent = editor_parent_window(host_win.hwnd);
     // SAFETY: host_win.hwnd was just created on this thread and outlives the plugin GUI (the
     // editor is `gui.destroy`d before HostWindow drops the window).
     let parented = unsafe { gui.set_parent(&mut handle, parent) };
@@ -318,7 +342,11 @@ fn editor_open(
     // A test's window stays hidden, as VST2's `show_editor`: nothing appears or takes the focus on
     // the machine that runs it.
     if cfg!(not(test)) {
-        show_host_window_front(host_win.hwnd);
+        if let Err(e) = show_host_window_front(host_win.hwnd) {
+            let _ = gui.hide(&mut handle);
+            gui.destroy(&mut handle);
+            return Err(e);
+        }
     }
     // From here the plugin's `request_resize` has a window to resize; one left from an earlier
     // editor is forgotten first.
@@ -482,6 +510,10 @@ struct LfMain {
     params_rescan: bool,
     /// The plugin's `clap_host_state.mark_dirty`: its state changed (engine mode saves its tone).
     state_dirty: bool,
+    /// The thread this instance was created on (its owner): the only one whose timer and fd
+    /// registrations are taken.
+    #[cfg(target_os = "linux")]
+    owner: super::editor_window::OwnerThread,
 }
 impl<'a> MainThreadHandler<'a> for LfMain {}
 impl HostStateImpl for LfMain {
@@ -489,6 +521,105 @@ impl HostStateImpl for LfMain {
         self.state_dirty = true;
     }
 }
+/// The plugin's timers and fds, run by the owner's loop on this (main) thread and called back from
+/// `Clap::idle` (`dispatch_run_loop`): what an embedded X11 editor draws and takes input with. A call
+/// off the owner thread is refused (`OwnerThread`): it would land in the caller's registry. Clack hands
+/// even a foreign caller `&mut LfMain`; these impls touch only `owner` (its id, its atomic count).
+#[cfg(target_os = "linux")]
+const OFF_OWNER: HostError = HostError::Message("not the plugin's main thread");
+#[cfg(target_os = "linux")]
+impl HostTimerImpl for LfMain {
+    fn register_timer(&mut self, period_ms: u32) -> Result<TimerId, HostError> {
+        if !self.owner.admits() {
+            return Err(OFF_OWNER);
+        }
+        Ok(TimerId(super::editor_window::register_timer(period_ms)))
+    }
+    fn unregister_timer(&mut self, timer_id: TimerId) -> Result<(), HostError> {
+        if !self.owner.admits() {
+            return Err(OFF_OWNER);
+        }
+        super::editor_window::unregister_timer(timer_id.0).then_some(()).ok_or(HostError::Message("no such timer"))
+    }
+}
+#[cfg(target_os = "linux")]
+impl HostPosixFdImpl for LfMain {
+    fn register_fd(&mut self, fd: std::os::fd::RawFd, flags: FdFlags) -> Result<(), HostError> {
+        if !self.owner.admits() {
+            return Err(OFF_OWNER);
+        }
+        super::editor_window::register_fd(fd, flags.bits()).then_some(()).ok_or(HostError::Message("fd already registered"))
+    }
+    fn modify_fd(&mut self, fd: std::os::fd::RawFd, flags: FdFlags) -> Result<(), HostError> {
+        if !self.owner.admits() {
+            return Err(OFF_OWNER);
+        }
+        super::editor_window::modify_fd(fd, flags.bits()).then_some(()).ok_or(HostError::Message("fd not registered"))
+    }
+    fn unregister_fd(&mut self, fd: std::os::fd::RawFd) -> Result<(), HostError> {
+        if !self.owner.admits() {
+            return Err(OFF_OWNER);
+        }
+        super::editor_window::unregister_fd(fd).then_some(()).ok_or(HostError::Message("fd not registered"))
+    }
+}
+
+/// A timer or fd registration from a thread other than the instance's owner is refused and leaves
+/// both threads' registries as they were.
+#[cfg(all(test, target_os = "linux"))]
+mod owner_thread_tests {
+    use super::*;
+    use crate::host::editor_window::{registered, FD_READ};
+
+    #[test]
+    fn a_registration_off_the_owner_thread_is_refused() {
+        let mut main = LfMain::default();
+        let id = main.register_timer(10).expect("the owner registers");
+        assert_eq!(registered(), (0, 1));
+        let (main, elsewhere) = std::thread::spawn(move || {
+            let refused = [
+                main.register_timer(10).is_err(),
+                main.unregister_timer(id).is_err(),
+                main.register_fd(0, FdFlags::from_bits_truncate(FD_READ)).is_err(),
+                main.modify_fd(0, FdFlags::from_bits_truncate(FD_READ)).is_err(),
+                main.unregister_fd(0).is_err(),
+            ];
+            assert_eq!(refused, [true; 5], "every call off the owner thread is refused");
+            (main, registered())
+        })
+        .join()
+        .unwrap();
+        assert_eq!(elsewhere, (0, 0), "the foreign thread's registry stays empty");
+        assert_eq!(registered(), (0, 1), "the owner's timer still stands");
+        let mut main = main;
+        main.unregister_timer(id).expect("the owner unregisters");
+        assert_eq!(registered(), (0, 0));
+    }
+}
+
+/// Owner turn (Linux): call the plugin back for each of its timers and fds the turn's pump found due.
+/// Never inside another plugin call; a registration a callback drops is not called after it.
+#[cfg(target_os = "linux")]
+fn dispatch_run_loop(instance: &mut PluginInstance<LfHost>) {
+    use super::editor_window::{next_ready, Ready};
+    instance.access_handler_mut(|m| m.owner.log_refused("timer-support/posix-fd-support"));
+    while let Some(ready) = next_ready() {
+        let mut handle = instance.plugin_handle();
+        match ready {
+            Ready::Fd(fd, bits) => {
+                if let Some(ext) = handle.get_extension::<PluginPosixFd>() {
+                    ext.on_fd(&mut handle, fd, FdFlags::from_bits_truncate(bits));
+                }
+            }
+            Ready::Timer(id) => {
+                if let Some(ext) = handle.get_extension::<PluginTimer>() {
+                    ext.on_timer(&mut handle, TimerId(id));
+                }
+            }
+        }
+    }
+}
+
 impl HostParamsImplMainThread for LfMain {
     fn rescan(&mut self, _flags: ParamRescanFlags) {
         self.params_rescan = true;
@@ -668,6 +799,8 @@ impl HostHandlers for LfHost {
         // `params`: the plugin's rescan/clear/request_flush callbacks (without it a preset loaded in
         // the plugin's GUI leaves the web UI's sliders stale).
         builder.register::<HostGui>().register::<HostParams>();
+        #[cfg(target_os = "linux")]
+        builder.register::<HostTimer>().register::<HostPosixFd>();
         if shared.keeps_tone {
             builder.register::<HostState>();
         }

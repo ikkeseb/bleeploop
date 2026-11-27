@@ -55,6 +55,8 @@ All versions below are as pinned/resolved in `src-tauri/Cargo.lock`.
 | walkdir | 2.5.0 | `Unlicense/MIT` (crate's own non-SPDX-normalized string; effectively dual Unlicense-or-MIT) |
 | vst3 | 0.3.0 | MIT OR Apache-2.0; see the separate VST3-hosting note below |
 | libloading | 0.8.9 | ISC; Linux builds only: loads a VST3 module (`dlopen`). Its copyright and permission notice is `licenses/ISC-libloading.txt` |
+| x11rb | 0.14.0 | MIT OR Apache-2.0; Linux builds only: the plugin editor windows (X11) |
+| libc | 0.2.189 | MIT OR Apache-2.0; Linux builds only: the plugin editor's `poll()` |
 | webview2-com | 0.38.2 | MIT |
 | windows | 0.61.3 | MIT OR Apache-2.0 |
 | windows-core | 0.61.2 | MIT OR Apache-2.0 |

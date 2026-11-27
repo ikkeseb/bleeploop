@@ -666,6 +666,28 @@ mod tests {
     const BLOCK: usize = 256;
     const DRY: f32 = 0.125;
 
+    /// The host's own log lines on stderr (`--nocapture` shows them), from the first rig on.
+    struct StderrLog;
+
+    impl log::Log for StderrLog {
+        fn enabled(&self, metadata: &log::Metadata) -> bool {
+            metadata.level() <= log::Level::Info
+        }
+        fn log(&self, record: &log::Record) {
+            if self.enabled(record.metadata()) {
+                eprintln!("[{} {}] {}", record.level(), record.target(), record.args());
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    fn init_log() {
+        static LOG: StderrLog = StderrLog;
+        if log::set_logger(&LOG).is_ok() {
+            log::set_max_level(log::LevelFilter::Info);
+        }
+    }
+
     struct Rig {
         host: EngineHost,
         frame: i64,
@@ -673,6 +695,7 @@ mod tests {
 
     impl Rig {
         fn new(rate: u32) -> Rig {
+            init_log();
             let host = EngineHost::default();
             let rig = Rig { host, frame: 0 };
             rig.engine_at(rate);
@@ -720,8 +743,57 @@ mod tests {
         }
 
         fn load(&self, format: PluginFormat, path: &str, id: &str, tone: Option<ToneBinding>) -> EngineSlotHandle {
+            self.load_with(format, path, id, tone, Arc::new(|_| {}))
+        }
+
+        fn load_with(&self, format: PluginFormat, path: &str, id: &str, tone: Option<ToneBinding>, sink: EventSink) -> EngineSlotHandle {
             let slot = SlotHost::new(self.host.core.clone(), 0);
-            engine_slot::load(format, path.to_string(), id.to_string(), slot, 0, Arc::new(|_| {}), tone).expect("the plugin loads")
+            engine_slot::load(format, path.to_string(), id.to_string(), slot, 0, sink, tone).expect("the plugin loads")
+        }
+
+        fn send(&self, command: Command) {
+            self.host.send(TimedCommand { frame: None, command }).expect("the ring takes the command");
+        }
+
+        /// Render blocks for `time`, letting the slot's owner run its turns meanwhile.
+        fn run_for(&mut self, time: Duration) {
+            let until = Instant::now() + time;
+            while Instant::now() < until {
+                self.render(4);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        /// Render until `done` holds, at most `time`; whether it did.
+        fn run_until(&mut self, time: Duration, mut done: impl FnMut(&mut Rig) -> bool) -> bool {
+            let until = Instant::now() + time;
+            while Instant::now() < until {
+                if done(self) {
+                    return true;
+                }
+                self.render(4);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            done(self)
+        }
+
+        /// The left output's peak over `blocks` blocks.
+        fn peak(&mut self, blocks: usize) -> f32 {
+            let mut peak = 0.0f32;
+            for _ in 0..blocks {
+                let input = [0.0; BLOCK];
+                let (mut l, mut r) = ([0.0; BLOCK], [0.0; BLOCK]);
+                {
+                    let mut run = lock(&self.host.core.run);
+                    let engine = run.idle.as_mut().expect("an idle engine");
+                    let cx = ProcessContext { frame: self.frame, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
+                    engine.process_inputs(&cx, [[&input, &input], [&input, &input]], &mut l, &mut r);
+                }
+                self.frame += BLOCK as i64;
+                peak = l.iter().fold(peak, |p, s| p.max(s.abs()));
+                std::thread::yield_now();
+            }
+            peak
         }
     }
 
@@ -847,6 +919,323 @@ mod tests {
     #[ignore = "needs LF_TEST_CLAP: docs/VERIFY.md § Linux plugin hosting"]
     fn a_clap_plugin_plays_takes_its_param_and_restores_its_tone() {
         gain_plugin_round_trip(PluginFormat::Clap, "LF_TEST_CLAP", "dev.bleeploop.test-gain", 1.5);
+    }
+
+    /// The CLAP test plugin's 10 ms timer and its fd (a socket pair it writes on each tick) run on its
+    /// owner's loop with no editor open and no display: both counts rise while it is loaded, and the
+    /// unload ends them with no callback after `destroy` (the plugin aborts the process on one).
+    #[test]
+    #[ignore = "needs LF_TEST_CLAP: docs/VERIFY.md § Linux plugin hosting"]
+    fn a_clap_plugins_timer_and_fd_run_on_its_owner_loop_without_an_editor() {
+        let path = std::env::var("LF_TEST_CLAP").expect("LF_TEST_CLAP names the built test plugin (docs/VERIFY.md § Linux plugin hosting)");
+        timer_and_fd_round_trip(&path, None);
+    }
+
+    /// An instance that leaves its timer and fd registered at `destroy`, on an owner that lives on: the
+    /// test plugin refuses the stored tone `LEAKREGS` and leaks its registrations, and the owner
+    /// destroys it and creates the next instance. The host must forget them: the plugin aborts the
+    /// process on a callback for a registration the new instance does not hold.
+    #[test]
+    #[ignore = "needs LF_TEST_CLAP: docs/VERIFY.md § Linux plugin hosting"]
+    fn a_clap_plugins_leftover_timer_and_fd_are_forgotten_at_its_destroy() {
+        use crate::host::tone::{encode, Tone};
+        let path = std::env::var("LF_TEST_CLAP").expect("LF_TEST_CLAP names the built test plugin (docs/VERIFY.md § Linux plugin hosting)");
+        let tones = std::env::temp_dir().join(format!("lf-linux-plugin-leak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tones);
+        let identity = ToneIdentity { format: PluginFormat::Clap.as_str().into(), path: path.clone(), id: "dev.bleeploop.test-gain".into() };
+        let store = ToneStore::new(tones.clone());
+        let leak = Tone { identity: identity.clone(), name: "LF Test Gain".into(), state: b"LEAKREGS".to_vec() };
+        store.save_encoded(0, &encode(&leak)).expect("the tone file");
+        timer_and_fd_round_trip(&path, Some(ToneBinding { store, key: ToneKey::Slot { slot: 0, identity }, imported: None }));
+        let _ = std::fs::remove_dir_all(&tones);
+    }
+
+    /// The test plugin's timer and fd counts rise on its owner loop; the unload ends them, and a
+    /// callback after it would abort the process.
+    fn timer_and_fd_round_trip(path: &str, tone: Option<ToneBinding>) {
+        let mut rig = Rig::new(RATE);
+        let handle = rig.load(PluginFormat::Clap, path, "dev.bleeploop.test-gain", tone);
+        let counts = || {
+            let params = handle.list_params().expect("params");
+            let count = |name: &str| params.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("a {name} parameter")).value;
+            (count("Ticks"), count("Fd wakes"))
+        };
+        let (ticks, wakes) = counts();
+        rig.run_for(Duration::from_millis(500));
+        let (ticks_after, wakes_after) = counts();
+        eprintln!("in 500 ms: {} timer ticks, {} fd wakes", ticks_after - ticks, wakes_after - wakes);
+        // A 10 ms timer at the owner's 20 ms turns: about 25 in 500 ms.
+        assert!(ticks_after - ticks >= 10.0, "the timer runs on the owner loop: {ticks} → {ticks_after}");
+        assert!(wakes_after - wakes >= 5.0, "the fd wakes the owner loop: {wakes} → {wakes_after}");
+
+        let unloading = std::thread::spawn(move || handle.unload());
+        while !unloading.is_finished() {
+            rig.render(1);
+        }
+        unloading.join().unwrap().expect("the unload");
+        // A late callback would abort the process here.
+        rig.run_for(Duration::from_millis(200));
+    }
+
+    /// The test's own X client on the private display the editor opens on: finds the editor window by
+    /// its `WM_CLASS`, reads its pixels, clicks it through XTEST and closes it as a window manager would.
+    struct Screen {
+        conn: x11rb::rust_connection::RustConnection,
+        root: u32,
+    }
+
+    impl Screen {
+        fn connect() -> Screen {
+            assert!(std::env::var_os("DISPLAY").is_some(), "DISPLAY names a private Xvfb (docs/VERIFY.md § Linux plugin hosting)");
+            use x11rb::connection::Connection as _;
+            use x11rb::protocol::xproto::ConnectionExt as _;
+            let (conn, screen) = x11rb::connect(None).expect("the X display");
+            let root = conn.setup().roots[screen].root;
+            // A window manager's stand-in: a desktop's window manager has interned these long before a
+            // plugin loads, and a bare Xvfb has none. JUCE looks them up only if they exist, when its
+            // editor is created (before the host window), and later sets `WM_PROTOCOLS` on its window
+            // with the atom it got: 0 here, a `BadAtom` that Xlib's default handler ends the process on.
+            for name in [
+                "WM_PROTOCOLS", "WM_DELETE_WINDOW", "WM_TAKE_FOCUS", "WM_STATE", "WM_CHANGE_STATE",
+                "_NET_WM_PING", "_NET_WM_STATE", "_NET_WM_STATE_HIDDEN", "_NET_WM_WINDOW_TYPE",
+                "_NET_WM_WINDOW_TYPE_NORMAL", "_NET_WORKAREA", "_MOTIF_WM_HINTS",
+            ] {
+                conn.intern_atom(false, name.as_bytes()).unwrap().reply().expect("an atom");
+            }
+            Screen { conn, root }
+        }
+
+        /// The editor window this host made (its `WM_CLASS`), if one exists.
+        fn editor_window(&self) -> Option<u32> {
+            use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
+            let tree = self.conn.query_tree(self.root).ok()?.reply().ok()?;
+            tree.children.into_iter().find(|&w| {
+                self.conn
+                    .get_property(false, w, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 64)
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                    .is_some_and(|p| p.value.starts_with(b"bleeploop-plugin\0"))
+            })
+        }
+
+        /// The window's origin on the screen and its size.
+        fn geometry(&self, window: u32) -> (i16, i16, u16, u16) {
+            use x11rb::protocol::xproto::ConnectionExt as _;
+            let g = self.conn.get_geometry(window).unwrap().reply().unwrap();
+            let at = self.conn.translate_coordinates(window, self.root, 0, 0).unwrap().reply().unwrap();
+            (at.dst_x, at.dst_y, g.width, g.height)
+        }
+
+        /// The pixels of `area` (x, y, width, height in window coordinates).
+        fn area_pixels(&self, window: u32, (x, y, w, h): (i16, i16, u16, u16)) -> Vec<u8> {
+            use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
+            self.conn.get_image(ImageFormat::Z_PIXMAP, window, x, y, w, h, !0).unwrap().reply().unwrap().data
+        }
+
+        /// How many distinct colours the window shows (its children's drawing included): a window the
+        /// plugin never drew into is one flat colour.
+        fn colours(&self, window: u32) -> usize {
+            use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
+            let (_, _, w, h) = self.geometry(window);
+            let image = self.conn.get_image(ImageFormat::Z_PIXMAP, window, 0, 0, w, h, !0).unwrap().reply().unwrap();
+            let mut seen: Vec<u32> = image.data.chunks_exact(4).step_by(7).map(|p| u32::from_le_bytes([p[0], p[1], p[2], 0])).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            seen.len()
+        }
+
+        /// A left-button drag from `from` to `to` (window coordinates), through XTEST.
+        fn drag(&self, window: u32, from: (i16, i16), to: (i16, i16)) {
+            use x11rb::connection::Connection as _;
+            use x11rb::protocol::xproto::{BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, MOTION_NOTIFY_EVENT};
+            use x11rb::protocol::xtest::ConnectionExt as _;
+            let (x0, y0, _, _) = self.geometry(window);
+            let at = |(x, y): (i16, i16)| (x0 + x, y0 + y);
+            let motion = |(x, y): (i16, i16)| {
+                self.conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, self.root, x, y, 0).unwrap();
+                self.conn.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(15));
+            };
+            motion(at(from));
+            self.conn.xtest_fake_input(BUTTON_PRESS_EVENT, 1, 0, self.root, 0, 0, 0).unwrap();
+            for step in 1..=10 {
+                let x = from.0 + (to.0 - from.0) * step / 10;
+                let y = from.1 + (to.1 - from.1) * step / 10;
+                motion(at((x, y)));
+            }
+            self.conn.xtest_fake_input(BUTTON_RELEASE_EVENT, 1, 0, self.root, 0, 0, 0).unwrap();
+            self.conn.flush().unwrap();
+        }
+
+        /// `WM_DELETE_WINDOW`, sent to the window the way a window manager's close button sends it: only
+        /// after the window advertised it in its `WM_PROTOCOLS`, as a window manager checks.
+        fn wm_close(&self, window: u32) {
+            use x11rb::connection::Connection as _;
+            use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask};
+            let atom = |name: &[u8]| self.conn.intern_atom(false, name).unwrap().reply().unwrap().atom;
+            let protocols = self.conn.get_property(false, window, atom(b"WM_PROTOCOLS"), AtomEnum::ATOM, 0, 32).unwrap().reply().unwrap();
+            let advertised: Vec<u32> = protocols.value32().map(Iterator::collect).unwrap_or_default();
+            assert!(advertised.contains(&atom(b"WM_DELETE_WINDOW")), "the window advertises WM_DELETE_WINDOW: {advertised:?}");
+            let event = ClientMessageEvent::new(32, window, atom(b"WM_PROTOCOLS"), [atom(b"WM_DELETE_WINDOW"), 0, 0, 0, 0]);
+            self.conn.send_event(false, window, EventMask::NO_EVENT, event).unwrap();
+            self.conn.flush().unwrap();
+        }
+
+        /// A screenshot of the whole display into `LF_TEST_SHOTS` (when set), as `<name>.png`.
+        fn shot(&self, name: &str) {
+            if let Some(dir) = std::env::var_os("LF_TEST_SHOTS") {
+                let file = std::path::Path::new(&dir).join(format!("{name}.png"));
+                let ok = std::process::Command::new("import").args(["-window", "root"]).arg(&file).status().is_ok_and(|s| s.success());
+                eprintln!("screenshot {}: {}", file.display(), if ok { "saved" } else { "FAILED" });
+            }
+        }
+    }
+
+    type Events = Arc<Mutex<Vec<EngineSlotEvent>>>;
+
+    /// One drag from `from` to `to`: the parameter it moved, when it moved one. It must move exactly
+    /// one (the control under it), reach the host as that parameter's `performEdit` (VST3), and the
+    /// plugin must redraw the drag's own area of the window.
+    fn drag_one(rig: &mut Rig, screen: &Screen, window: u32, handle: &EngineSlotHandle, events: &Events, format: PluginFormat, from: (i16, i16), to: (i16, i16)) -> Option<u32> {
+        let (_, _, w, h) = screen.geometry(window);
+        // The drag's column, 24 px either side, from above its top to below its bottom.
+        let (x0, y0) = ((from.0 - 24).max(0), (from.1.min(to.1) - 24).max(0));
+        let area = (x0, y0, 48.min(w - x0 as u16), ((from.1 - to.1).unsigned_abs() + 48).min(h - y0 as u16));
+        let before = handle.list_params().expect("params");
+        let drawn = screen.area_pixels(window, area);
+        events.lock().unwrap().clear();
+        screen.drag(window, from, to);
+        rig.run_for(Duration::from_millis(150));
+        let after = handle.list_params().expect("params");
+        let moved: Vec<_> = before.iter().zip(&after).filter(|(b, a)| b.id == a.id && (b.value - a.value).abs() > 1e-6).collect();
+        let [(b, a)] = moved.as_slice() else {
+            let names: Vec<_> = moved.iter().map(|(b, _)| b.name.as_str()).collect();
+            assert!(names.is_empty(), "one drag moved {} parameters: {names:?}", names.len());
+            return None;
+        };
+        eprintln!("drag {from:?} → {to:?} moved {:?} (id {}): {} → {}", b.name, b.id, b.value, a.value);
+        if format == PluginFormat::Vst3 {
+            let edited = events.lock().unwrap().iter().any(|e| matches!(e, EngineSlotEvent::ParamChanged { id, .. } if *id == b.id));
+            assert!(edited, "performEdit of the dragged parameter {:?} reached the host", b.name);
+        }
+        assert!(rig.run_until(Duration::from_secs(2), |_| screen.area_pixels(window, area) != drawn), "the plugin redrew the dragged control {:?}", b.name);
+        Some(b.id)
+    }
+
+    /// Drag upward across the editor's lower right (Surge's envelope and LFO sliders) until a drag
+    /// moves a parameter: its start point and the parameter's id and name.
+    fn find_a_control(rig: &mut Rig, screen: &Screen, window: u32, handle: &EngineSlotHandle, events: &Events, format: PluginFormat) -> Option<((i16, i16), u32, String)> {
+        let (_, _, w, h) = screen.geometry(window);
+        let (w, h) = (i32::from(w), i32::from(h));
+        // In i32: a 900 px editor times a percentage overflows i16.
+        let point = |x: i32, y: i32| (i16::try_from(x).expect("on the screen"), i16::try_from(y).expect("on the screen"));
+        for row in [80, 88, 72] {
+            for col in (52..=96).step_by(4) {
+                let (x, y) = (w * col / 100, h * row / 100);
+                if let Some(id) = drag_one(rig, screen, window, handle, events, format, point(x, y), point(x, y - h / 12)) {
+                    let name = handle.list_params().expect("params").into_iter().find(|p| p.id == id).map(|p| p.name).unwrap_or_default();
+                    return Some((point(x, y), id, name));
+                }
+            }
+        }
+        None
+    }
+
+    /// Surge XT's editor from slot 0 on a private X display: it opens, draws and takes input (an XTEST
+    /// drag moves a parameter the host reads back); stays open, drawing and playing across an engine
+    /// rebuild that re-activates the unit; closes through the app and through `WM_DELETE_WINDOW` (the
+    /// latter as the app's `EditorClosed`), leaving no window behind.
+    fn surge_editor_round_trip(format: PluginFormat, env: &str, id: &str) {
+        // Skipped, not failed, without its display or plugin: `--ignored` on this module also runs the
+        // offline gain tests, which need neither.
+        let (Some(path), Some(_)) = (std::env::var_os(env), std::env::var_os("DISPLAY")) else {
+            eprintln!("SKIPPED: the Surge editor test needs {env} and DISPLAY (a private Xvfb): docs/VERIFY.md § Linux plugin hosting");
+            return;
+        };
+        let path = path.into_string().expect("a UTF-8 plugin path");
+        let screen = Screen::connect();
+        assert_eq!(screen.editor_window(), None, "no editor window before the test");
+        let tag = format.as_str();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink: EventSink = {
+            let events = events.clone();
+            Arc::new(move |event| events.lock().unwrap().push(event))
+        };
+        let mut rig = Rig::new(RATE);
+        rig.send(Command::SelectInstrument(lf_engine::NoteTarget::Slot(0)));
+        let handle = rig.load_with(format, &path, id, None, sink);
+        rig.send(Command::NoteOn(60, 0.8));
+        assert!(rig.run_until(Duration::from_secs(3), |rig| rig.peak(8) > 1e-3), "Surge plays a note");
+        rig.send(Command::NoteOff(60));
+
+        handle.open_editor().expect("the editor opens");
+        let mut window = None;
+        assert!(rig.run_until(Duration::from_secs(5), |_| { window = screen.editor_window(); window.is_some() }), "an editor window appears");
+        let window = window.unwrap();
+        assert!(rig.run_until(Duration::from_secs(10), |_| screen.colours(window) > 50), "the editor draws into it");
+        screen.shot(&format!("{tag}-1-open"));
+        let (at, dragged, name) = find_a_control(&mut rig, &screen, window, &handle, &events, format).expect("an XTEST drag moves a parameter");
+        screen.shot(&format!("{tag}-2-dragged-{}", name.replace(|c: char| !c.is_ascii_alphanumeric(), "_")));
+
+        // A new engine at another rate: the owner re-activates the unit and installs it there, the
+        // editor still open.
+        rig.engine_at(44_100);
+        rig.send(Command::SelectInstrument(lf_engine::NoteTarget::Slot(0)));
+        let replays = rig.run_until(Duration::from_secs(5), |rig| {
+            rig.send(Command::NoteOn(64, 0.8));
+            rig.peak(16) > 1e-3
+        });
+        assert!(replays, "the re-activated unit plays in the new engine");
+        rig.send(Command::NoteOff(64));
+        assert_eq!(screen.editor_window(), Some(window), "the editor stayed open across the rebuild");
+        // Shown by a new change, not by pixels from before the rebuild: the same control dragged back
+        // down must move the same parameter (VST3: through its performEdit), and the plugin must
+        // redraw it.
+        let back = (at.0, at.1 + i16::try_from(screen.geometry(window).3 / 12).unwrap());
+        let moved = drag_one(&mut rig, &screen, window, &handle, &events, format, at, back);
+        assert_eq!(moved, Some(dragged), "after the rebuild the drag moves {name:?} again");
+        screen.shot(&format!("{tag}-3-after-rebuild"));
+
+        // Closed by the app (CloseEditor).
+        handle.close_editor().expect("the editor closes");
+        assert!(rig.run_until(Duration::from_secs(2), |_| screen.editor_window().is_none()), "no window left after CloseEditor");
+        screen.shot(&format!("{tag}-4-closed-by-app"));
+
+        // Closed by the window manager's close button.
+        handle.open_editor().expect("the editor opens again");
+        let mut window = None;
+        assert!(rig.run_until(Duration::from_secs(5), |_| { window = screen.editor_window(); window.is_some() }), "it reopens");
+        let window = window.unwrap();
+        assert!(rig.run_until(Duration::from_secs(10), |_| screen.colours(window) > 50), "and draws");
+        screen.shot(&format!("{tag}-5-reopened"));
+        events.lock().unwrap().clear();
+        screen.wm_close(window);
+        let closed = rig.run_until(Duration::from_secs(2), |_| events.lock().unwrap().contains(&EngineSlotEvent::EditorClosed));
+        assert!(closed, "WM_DELETE_WINDOW arrives as the app's EditorClosed");
+        assert!(rig.run_until(Duration::from_secs(2), |_| screen.editor_window().is_none()), "no window left after the WM close");
+        screen.shot(&format!("{tag}-6-closed-by-wm"));
+
+        // Open again and unload with it open: the unload closes it first.
+        handle.open_editor().expect("the editor opens a third time");
+        assert!(rig.run_until(Duration::from_secs(5), |_| screen.editor_window().is_some()), "it reopens");
+        let unloading = std::thread::spawn(move || handle.unload());
+        while !unloading.is_finished() {
+            rig.render(1);
+        }
+        unloading.join().unwrap().expect("the unload");
+        assert_eq!(screen.editor_window(), None, "the unload leaves no window");
+    }
+
+    #[test]
+    #[ignore = "needs DISPLAY (a private Xvfb) and LF_TEST_SURGE_CLAP: docs/VERIFY.md § Linux plugin hosting"]
+    fn surge_clap_editor_opens_draws_takes_input_survives_a_rebuild_and_closes() {
+        surge_editor_round_trip(PluginFormat::Clap, "LF_TEST_SURGE_CLAP", "org.surge-synth-team.surge-xt");
+    }
+
+    #[test]
+    #[ignore = "needs DISPLAY (a private Xvfb) and LF_TEST_SURGE_VST3: docs/VERIFY.md § Linux plugin hosting"]
+    fn surge_vst3_editor_opens_draws_takes_input_survives_a_rebuild_and_closes() {
+        surge_editor_round_trip(PluginFormat::Vst3, "LF_TEST_SURGE_VST3", "abcdef019182faeb566d624153675854");
     }
 
     /// The VST3 twin: a separated component and controller in a `.vst3` bundle (`ModuleEntry`,

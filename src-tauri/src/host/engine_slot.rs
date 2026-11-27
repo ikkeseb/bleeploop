@@ -423,6 +423,9 @@ pub(super) fn serve<P: OwnedPlugin>(
             return Ok(());
         }
     };
+    // Linux titles an editor window with the plugin's name (Windows keeps its fixed title).
+    #[cfg(target_os = "linux")]
+    super::super::editor_window::set_editor_title(&name);
     // Before the load is reported, so the caller's first `set_param` finds its ids.
     publish_param_ids(&param_ids, &plugin.params().unwrap_or_default());
     let kind = if unit.info().source { SlotKind::Instrument } else { SlotKind::Effect };
