@@ -341,12 +341,13 @@ impl EngineHost {
             *existing = Some(ends);
             drop(existing);
             drop(settings);
-            let old_engine = run.idle.take();
-            run.frame = 0;
-            run.input.rebuilt(self);
             // The plugin units leave the replaced engine for their owners, who re-activate them here.
+            // The ports' lock goes before the input's rebuild, which sends through `settings`.
+            let old_engine = run.idle.take();
             slot_ports.replace(old_engine, Some(ports));
             drop(slot_ports);
+            run.frame = 0;
+            run.input.rebuilt(self);
             drop(run);
             device
         };
