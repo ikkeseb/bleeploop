@@ -26,9 +26,13 @@ def main():
                 time.sleep(0.025)
             else:
                 raise RuntimeError("Private PipeWire server did not open its socket")
-            for fixture in ("fixture_in", "fixture_out"):
+            # Two sinks (playback_* ports and their monitor_*) and a source (capture_* ports): only
+            # the source is an input endpoint. pipewire-jack names a null node of class
+            # Audio/Source/Virtual's outputs capture_*; plain Audio/Source would give it sink ports.
+            for fixture, media in (("fixture_in", "Audio/Sink"), ("fixture_out", "Audio/Sink"),
+                                   ("fixture_src", "Audio/Source/Virtual")):
                 props = (f"{{ factory.name=support.null-audio-sink node.name={fixture} node.description={fixture} "
-                         "media.class=Audio/Sink object.linger=true audio.position=[ FL FR ] "
+                         f"media.class={media} object.linger=true audio.position=[ FL FR ] "
                          "adapter.auto-port-config={ mode=dsp monitor=true position=preserve } }")
                 subprocess.run(["pw-cli", "create-node", "adapter", props], env=env, check=True, timeout=5)
             # Pass a prebuilt lib test binary for fast repeats. Otherwise use the workspace toolchain.

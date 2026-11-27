@@ -482,6 +482,8 @@ pub async fn plugin_open_editor(slot: u8, frontend_epoch: u32, app: tauri::AppHa
     }
     #[cfg(target_os = "linux")]
     {
+        // The editor window opens centred on the BleepLoop window's monitor (`editor_window_linux.rs`).
+        super::editor_window::set_placement(main_window_monitor(&app));
         linux_blocking(app, "plugin_open_editor", move |slots, state| slots.open_editor(state, frontend_epoch, slot)).await
     }
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -490,6 +492,21 @@ pub async fn plugin_open_editor(slot: u8, frontend_epoch: u32, app: tauri::AppHa
         Err(format!("plugin_open_editor is Windows-only (slot={slot})"))
     }
 }
+/// The monitor the main window is on, as the toolkit reports it; `None` when it cannot be read.
+#[cfg(target_os = "linux")]
+fn main_window_monitor(app: &tauri::AppHandle) -> Option<super::editor_window::Placement> {
+    use tauri::Manager;
+    let monitor = app.get_webview_window("main")?.current_monitor().ok()??;
+    let (at, size) = (monitor.position(), monitor.size());
+    let monitor_rect = super::editor_window::Rect {
+        x: at.x,
+        y: at.y,
+        width: i32::try_from(size.width).ok()?,
+        height: i32::try_from(size.height).ok()?,
+    };
+    Some(super::editor_window::Placement { monitor: monitor_rect, scale: monitor.scale_factor() })
+}
+
 /// P10.0: hide + destroy the slot's plugin editor (owner thread), for the document with
 /// `frontend_epoch`. Idempotent — closing a non-open editor is a harmless no-op.
 #[tauri::command]
