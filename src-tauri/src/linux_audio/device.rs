@@ -2,7 +2,10 @@
 //! quantum are known; only then does the host hand it the engine from the preceding run.
 #[path = "../engine_io/fpu.rs"]
 mod fpu;
+#[cfg(test)]
+mod endpoint_test;
 mod jack;
+mod pipewire;
 #[cfg(test)]
 mod private_test;
 
@@ -101,54 +104,42 @@ pub struct Endpoint {
 struct Group {
     info: Endpoint,
     ports: Vec<CString>,
-    priority: u8,
+    physical: bool,
 }
 
-// Keep the capture channels of a device distinct from its playback monitor ports. Named JACK
-// clients and their port names survive enumeration changes; server-assigned numeric IDs do not.
+// A capture endpoint is a source's `capture_*` ports, hardware or virtual, and a playback endpoint a
+// sink's `playback_*` ports. pipewire-jack names an app's streams `output_*`/`input_*` and a sink's
+// monitor `monitor_*`: those are never endpoints. Named JACK clients and their port names survive
+// enumeration changes; server-assigned numeric IDs do not.
 fn groups(client: &Client, capture: bool) -> Vec<Group> {
     let direction = if capture { OUTPUT } else { INPUT };
     let physical: HashSet<_> = client.names(direction | PHYSICAL).into_iter().collect();
+    group_ports(client.names(direction), &physical, capture)
+}
+
+fn group_ports(ports: Vec<CString>, physical: &HashSet<CString>, capture: bool) -> Vec<Group> {
+    let prefix = if capture { "capture_" } else { "playback_" };
     let mut groups = BTreeMap::new();
-    for port in client.names(direction) {
+    for port in ports {
         let Ok(full_name) = port.to_str() else {
             continue;
         };
         let Some((owner, channel)) = full_name.split_once(':') else {
             continue;
         };
-        if owner.starts_with("BleepLoop") {
+        if owner.starts_with("BleepLoop") || !channel.starts_with(prefix) {
             continue;
         }
-        let monitor = capture && channel.starts_with("monitor_");
-        let id = if monitor {
-            format!("{owner}:monitor")
-        } else {
-            owner.to_owned()
-        };
-        let priority = if monitor {
-            3
-        } else if physical.contains(&port) {
-            0
-        } else if channel.starts_with(if capture { "capture_" } else { "playback_" }) {
-            1
-        } else {
-            2
-        };
-        let group = groups.entry(id.clone()).or_insert_with(|| Group {
+        let group = groups.entry(owner.to_owned()).or_insert_with(|| Group {
             info: Endpoint {
-                id,
-                name: if monitor {
-                    format!("{owner} (monitor)")
-                } else {
-                    owner.to_owned()
-                },
+                id: owner.to_owned(),
+                name: owner.to_owned(),
                 channels: 0,
             },
             ports: Vec::new(),
-            priority,
+            physical: false,
         });
-        group.priority = group.priority.min(priority);
+        group.physical |= physical.contains(&port);
         group.info.channels += 1;
         group.ports.push(port);
     }
@@ -167,11 +158,19 @@ fn groups(client: &Client, capture: bool) -> Vec<Group> {
             (order, ch.to_owned())
         });
     }
-    result.sort_by_key(|group| group.priority);
+    result.sort_by_key(|group| !group.physical);
     result
 }
 
-fn selected(groups: Vec<Group>, id: &Option<String>, side: &str) -> Result<Option<Group>, String> {
+/// An explicit id resolves only among the listed groups, so a listing and an open agree. Without
+/// one, the first listed group that is not a webcam (physical ones come first); `avoid` runs only
+/// then, since only that pick needs it.
+fn selected(
+    groups: Vec<Group>,
+    id: &Option<String>,
+    side: &str,
+    avoid: impl FnOnce() -> HashSet<String>,
+) -> Result<Option<Group>, String> {
     if let Some(id) = id {
         return groups
             .into_iter()
@@ -179,8 +178,11 @@ fn selected(groups: Vec<Group>, id: &Option<String>, side: &str) -> Result<Optio
             .map(Some)
             .ok_or_else(|| format!("JACK {side} endpoint {id:?} is unavailable"));
     }
-    // Avoid automatically patching unrelated applications, especially playback monitor sources.
-    Ok(groups.into_iter().find(|g| g.priority < 2))
+    if groups.is_empty() {
+        return Ok(None);
+    }
+    let avoid = avoid();
+    Ok(groups.into_iter().find(|g| !avoid.contains(&g.info.id)))
 }
 
 fn endpoints(capture: bool) -> Result<Vec<Endpoint>, String> {
@@ -335,8 +337,21 @@ impl Prepared {
         }
         let client = Client::open(c"BleepLoop")?;
         let raw = client.raw();
-        let input = selected(groups(&client, true), &request.input, "capture")?;
-        let output = selected(groups(&client, false), &request.output, "playback")?.ok_or(
+        // A webcam's mic is listed but never the default input; with no other source the device
+        // opens output-only.
+        let input = selected(
+            groups(&client, true),
+            &request.input,
+            "capture",
+            pipewire::webcams,
+        )?;
+        let output = selected(
+            groups(&client, false),
+            &request.output,
+            "playback",
+            HashSet::new,
+        )?
+        .ok_or(
             "No JACK playback endpoint found. Select an available output in Audio Settings.",
         )?;
         let input_id = input.as_ref().map(|g| g.info.id.clone());

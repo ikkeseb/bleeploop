@@ -178,6 +178,15 @@ cd src-tauri && env -u WAYLAND_DISPLAY DISPLAY=:93 HOME=/tmp/lf-home LF_TEST_SHO
   cargo test --lib linux_audio::plugins::tests::surge -- --ignored --nocapture --test-threads=1
 ```
 
+Where the window opens: the ignored `an_editor_window_asks_for_its_centred_place` asks for a
+1141x711 window centred on a 1920x1080 monitor right of a 2560x1440 one (the owner's desktop) and must
+find that place in the window's geometry and in its program-specified `WM_NORMAL_HINTS` position, with
+the fixed size; it needs an Xvfb the width of both (`Xvfb :95 -screen 0 4480x1440x24`, then
+`env -u WAYLAND_DISPLAY DISPLAY=:95 cargo test --lib an_editor_window_asks_for_its_centred_place --
+--ignored`). It shows what the window asks for, never where a window manager puts it: Hyprland 0.56
+reads both from the window's geometry (an X11 window at (0, 0) goes to the first monitor's top left),
+which only a real Hyprland session shows.
+
 In the app: `verify/linux-app/plugin-probe.mjs` runs a debug app (built with `build.devUrl`
 `http://127.0.0.1:14937`, as § Linux desktop audio builds it) on a private PipeWire graph of two null
 sinks, its own X display and a temporary HOME, with the test plugins as its only plugin folders, and

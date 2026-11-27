@@ -8,7 +8,13 @@
 //! XID as a pointer-sized integer. The window sets `WM_DELETE_WINDOW`: a window manager's close
 //! arrives as that ClientMessage and makes `close_requested()` true, which the owner tears down as it
 //! does the Win32 close box. Fixed size (min = max size hints), as the Win32 window is; the plugin's
-//! own resize requests land in `set_client_size`. The window's own `ConfigureNotify` records the size
+//! own resize requests land in `set_client_size`. **Placement:** the window opens centred on the
+//! monitor the BleepLoop window is on (`set_placement`, from the open command), its position in both
+//! the window's geometry and `WM_NORMAL_HINTS` (program-specified): Hyprland (0.56) floats it for its
+//! fixed size and places an X11 window where its geometry says, the top left of the first monitor
+//! for one at (0, 0); a window manager that does its own placement may ignore it. The main window is
+//! a Wayland client, so no `WM_TRANSIENT_FOR` can name it, and Wayland tells no client where a
+//! window sits: centred on its monitor is the closest to "over the app" an X11 window can ask for. The window's own `ConfigureNotify` records the size
 //! it really has (`client_size`); **known limit:** a window manager that configures it to another size
 //! is logged, but the plugin is not told (no renegotiation). Creation, its properties and its map are
 //! checked requests, so an open the X server refused fails. The window is a minimal XEmbed embedder:
@@ -41,12 +47,13 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use x11rb::connection::Connection;
 use x11rb::cookie::VoidCookie;
 use x11rb::errors::ConnectionError;
-use x11rb::properties::WmSizeHints;
+use x11rb::properties::{WmSizeHints, WmSizeHintsSpecification};
 use x11rb::protocol::xproto::{
     AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, NotifyDetail,
     NotifyMode, PropMode, StackMode, WindowClass,
@@ -375,6 +382,8 @@ struct Display {
     utf8_string: u32,
     xembed: u32,
     xembed_info: u32,
+    /// The X screen (all monitors), where a window's position must stay.
+    screen: Rect,
     windows: Vec<Window>,
 }
 
@@ -387,9 +396,9 @@ impl Display {
     }
 
     fn with(conn: RustConnection, screen: usize) -> XResult<Display> {
-        let (root, black) = {
+        let (root, black, screen) = {
             let s = conn.setup().roots.get(screen).ok_or("the X display has no such screen")?;
-            (s.root, s.black_pixel)
+            (s.root, s.black_pixel, Rect { x: 0, y: 0, width: s.width_in_pixels.into(), height: s.height_in_pixels.into() })
         };
         let cookies = [b"WM_PROTOCOLS".as_slice(), b"WM_DELETE_WINDOW", b"_NET_WM_NAME", b"UTF8_STRING", b"_XEMBED", b"_XEMBED_INFO"]
             .map(|name| conn.intern_atom(false, name));
@@ -398,7 +407,7 @@ impl Display {
             *atom = cookie?.reply()?.atom;
         }
         let [wm_protocols, wm_delete, net_wm_name, utf8_string, xembed, xembed_info] = atoms;
-        Ok(Display { conn, root, black, wm_protocols, wm_delete, net_wm_name, utf8_string, xembed, xembed_info, windows: Vec::new() })
+        Ok(Display { conn, root, black, wm_protocols, wm_delete, net_wm_name, utf8_string, xembed, xembed_info, screen, windows: Vec::new() })
     }
 
     fn window(&mut self, xid: u32) -> Option<&mut Window> {
@@ -408,8 +417,10 @@ impl Display {
     /// Create the window, its properties and (in a test build) its map as checked requests: an open
     /// the X server refused is an error, never a success with no window. A failed step destroys what
     /// was created.
-    fn create(&mut self, width: u32, height: u32, title: &str) -> XResult<u32> {
+    fn create(&mut self, width: u32, height: u32, title: &str, monitor: Option<Rect>) -> XResult<u32> {
         let (w, h) = (side(width), side(height));
+        let at = monitor.map(|m| centred(m, self.screen, w, h));
+        let (x, y) = at.unwrap_or((0, 0));
         let xid = self.conn.generate_id()?;
         // Structure: its own close, configure and destroy; substructure: the plugin's window arriving
         // in it (XEmbed); focus: the XEmbed activation the child is told about.
@@ -420,8 +431,8 @@ impl Display {
                 x11rb::COPY_DEPTH_FROM_PARENT,
                 xid,
                 self.root,
-                0,
-                0,
+                x,
+                y,
                 w as u16,
                 h as u16,
                 0,
@@ -436,7 +447,7 @@ impl Display {
             conn.change_property8(PropMode::REPLACE, xid, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes())?.check()?;
             conn.change_property8(PropMode::REPLACE, xid, self.net_wm_name, self.utf8_string, title.as_bytes())?.check()?;
             conn.change_property8(PropMode::REPLACE, xid, AtomEnum::WM_CLASS, AtomEnum::STRING, WM_CLASS)?.check()?;
-            fixed_size(conn, xid, w, h)?.check()?;
+            fixed_size(conn, xid, w, h, at)?.check()?;
             if cfg!(test) {
                 conn.map_window(xid)?.check()?;
             }
@@ -456,7 +467,7 @@ impl Display {
     fn resize(&mut self, xid: u32, width: u32, height: u32) -> XResult<(u32, u32)> {
         let (w, h) = (side(width), side(height));
         // Hints first: a window manager holds a configure against the min/max size it last read.
-        drop(fixed_size(&self.conn, xid, w, h)?);
+        drop(fixed_size(&self.conn, xid, w, h, None)?);
         let seq = self.conn.configure_window(xid, &ConfigureWindowAux::new().width(w).height(h))?.sequence_number();
         self.conn.flush()?;
         if let Some(win) = self.window(xid) {
@@ -618,9 +629,48 @@ fn side(pixels: u32) -> u32 {
 }
 
 /// Pin the window's size for a window manager (min = max), as the Win32 window has no sizing frame.
-fn fixed_size(conn: &RustConnection, xid: u32, w: u32, h: u32) -> Result<VoidCookie<'_, RustConnection>, ConnectionError> {
-    let hints = WmSizeHints { min_size: Some((w as i32, h as i32)), max_size: Some((w as i32, h as i32)), ..WmSizeHints::new() };
+/// `WM_NORMAL_HINTS`: a fixed size (min = max), and at creation the program-specified position.
+fn fixed_size(
+    conn: &RustConnection,
+    xid: u32,
+    w: u32,
+    h: u32,
+    at: Option<(i16, i16)>,
+) -> Result<VoidCookie<'_, RustConnection>, ConnectionError> {
+    let position = at.map(|(x, y)| (WmSizeHintsSpecification::ProgramSpecified, i32::from(x), i32::from(y)));
+    let hints = WmSizeHints { position, min_size: Some((w as i32, h as i32)), max_size: Some((w as i32, h as i32)), ..WmSizeHints::new() };
     hints.set_normal_hints(conn, xid)
+}
+
+/// A rectangle in X screen pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Where a `w`×`h` window opens: centred on `monitor`, kept on it (its top left on the monitor's
+/// where the window is larger), and inside the X screen, in the range a window's position takes.
+fn centred(monitor: Rect, screen: Rect, w: u32, h: u32) -> (i16, i16) {
+    let axis = |origin: i32, span: i32, size: u32, screen_span: i32| {
+        let size = i32::try_from(size).unwrap_or(i32::MAX);
+        let at = origin + ((span - size) / 2).max(0);
+        // Inside the screen where it fits there; at 0 where it does not.
+        let at = at.min(screen_span - size).max(0);
+        i16::try_from(at).unwrap_or(i16::MAX)
+    };
+    (axis(monitor.x, monitor.width, w, screen.x + screen.width), axis(monitor.y, monitor.height, h, screen.y + screen.height))
+}
+
+/// The monitor the next editor window opens centred on (module doc), set by the open command.
+static PLACEMENT: Mutex<Option<Rect>> = Mutex::new(None);
+
+/// Set the monitor the next editor window opens centred on: the BleepLoop window's, in physical
+/// pixels, or `None` for the top left of the screen.
+pub(super) fn set_placement(monitor: Option<Rect>) {
+    *PLACEMENT.lock().unwrap_or_else(|e| e.into_inner()) = monitor;
 }
 
 #[derive(Default)]
@@ -720,7 +770,8 @@ pub(super) fn create_host_window(width: u32, height: u32) -> Result<HostWindow, 
         }
         let title = if o.title.is_empty() { "BleepLoop Plugin".to_string() } else { o.title.clone() };
         let display = o.display.as_mut().expect("opened above");
-        let created = display.create(width, height, &title).map_err(|e| format!("X editor window: {e}"));
+        let monitor = *PLACEMENT.lock().unwrap_or_else(|e| e.into_inner());
+        let created = display.create(width, height, &title, monitor).map_err(|e| format!("X editor window: {e}"));
         o.release_idle_display();
         created
     })
@@ -922,6 +973,43 @@ mod tests {
     fn showing_a_window_this_thread_does_not_hold_fails() {
         assert!(show_host_window_front(HWND::from_xid(0)).is_err(), "no window");
         assert!(show_host_window_front(HWND::from_xid(0x0060_0001)).is_err(), "no X connection on this thread");
+    }
+
+    /// The owner's desktop: the 2560x1440 monitor at the origin and a 1920x1080 one to its right.
+    #[test]
+    fn an_editor_opens_centred_on_the_app_monitor_and_on_screen() {
+        let screen = Rect { x: 0, y: 0, width: 4480, height: 1440 };
+        let left = Rect { x: 0, y: 0, width: 2560, height: 1440 };
+        let right = Rect { x: 2560, y: 0, width: 1920, height: 1080 };
+        assert_eq!(centred(left, screen, 1141, 711), (709, 364), "Surge XT on the main monitor");
+        assert_eq!(centred(right, screen, 1141, 711), (2560 + 389, 184), "on the other monitor");
+        assert_eq!(centred(right, screen, 2000, 1200), (2480, 0), "wider than its monitor: its left edge stays on screen");
+        assert_eq!(centred(left, screen, 5000, 2000), (0, 0), "larger than the screen: the top left");
+        let elsewhere = Rect { x: 9000, y: 9000, width: 1920, height: 1080 };
+        assert_eq!(centred(elsewhere, screen, 1141, 711), (4480 - 1141, 1440 - 711), "a monitor off the X screen: kept on it");
+    }
+
+    /// On a private X server only (`env -u WAYLAND_DISPLAY DISPLAY=:9x`, an Xvfb at 4480x1440: the
+    /// owner's two monitors side by side), never the desktop's display: the window opens where
+    /// `centred` puts it and says so in its geometry and its program-specified position hint.
+    #[test]
+    #[ignore = "needs a private Xvfb at 4480x1440: docs/VERIFY.md § Linux plugin hosting"]
+    fn an_editor_window_asks_for_its_centred_place() {
+        use x11rb::properties::WmSizeHints;
+        let monitor = Rect { x: 2560, y: 0, width: 1920, height: 1080 };
+        set_placement(Some(monitor));
+        let win = create_host_window(1141, 711).expect("host window");
+        set_placement(None);
+        let xid = win.hwnd.xid().expect("an XID");
+        let (conn, _) = x11rb::connect(None).expect("the private X display");
+        let geometry = conn.get_geometry(xid).unwrap().reply().unwrap();
+        assert_eq!((geometry.x, geometry.y, geometry.width, geometry.height), (2949, 184, 1141, 711));
+        let hints = WmSizeHints::get_normal_hints(&conn, xid).unwrap().reply().unwrap().expect("WM_NORMAL_HINTS");
+        let position = hints.position.expect("a position hint");
+        assert!(matches!(position.0, WmSizeHintsSpecification::ProgramSpecified), "program-specified");
+        assert_eq!((position.1, position.2), (2949, 184));
+        assert_eq!((hints.min_size, hints.max_size), (Some((1141, 711)), Some((1141, 711))), "fixed size");
+        drop(win);
     }
 
     #[test]

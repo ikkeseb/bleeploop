@@ -1,4 +1,5 @@
-//! Driven by verify/linux-app/private-graph.py on a new server with two virtual stereo endpoints.
+//! Driven by verify/linux-app/private-graph.py on a new server with two virtual stereo sinks and a
+//! virtual stereo source.
 use super::*;
 use lf_engine::{Command, EngineConfig, TimedCommand};
 
@@ -80,10 +81,19 @@ fn private_jack_quantum_and_routes() {
     let inputs = list_inputs().unwrap();
     assert!(inputs
         .iter()
-        .any(|e| e.id == "fixture_in:monitor" && e.channels == 2));
+        .any(|e| e.id == "fixture_src" && e.channels == 2));
+    assert!(
+        inputs.iter().all(|e| !e.id.starts_with("fixture_in")),
+        "a sink monitor is no input: {inputs:?}"
+    );
+    let outputs = list_outputs().unwrap();
+    assert!(
+        outputs.iter().all(|e| e.id != "fixture_src"),
+        "a source's input stream is no output: {outputs:?}"
+    );
     let server = DeviceRequest {
         backend: "Jack".into(),
-        input: Some("fixture_in:monitor".into()),
+        input: Some("fixture_src".into()),
         output: None,
         input_channels: [Some(InputPick::Pair([0, 1])), Some(InputPick::Mono(7))],
         buffer: None,
@@ -190,6 +200,11 @@ fn private_jack_quantum_and_routes() {
         small * 2,
         "port change must retain explicit quantum"
     );
+    assert_eq!(
+        device.status().input_name,
+        "fixture_src",
+        "the default input is the one source"
+    );
     let (engine, frame, fault) = device.stop();
     assert!(!fault);
     let mut next = Prepared::new(&high).unwrap();
@@ -197,7 +212,7 @@ fn private_jack_quantum_and_routes() {
     next.settle().unwrap();
     let device = next.start(engine, frame).map_err(|e| e.0).unwrap();
     assert_eq!(device.status().block, small * 2);
-    assert_eq!(device.status().input_name, "fixture_in (monitor)");
+    assert_eq!(device.status().input_name, "fixture_src");
     assert_eq!(device.status().output_name, "LatencyFixture");
     let follow = DeviceRequest {
         buffer: None,

@@ -225,7 +225,9 @@ plugin-GUI work.
   calls them back after the turn's pump; while a hosted editor is open the owner's wait is one `poll()` over
   its X connection, those fds and the nearest timer (≤ 20 ms). A window manager's close is
   `WM_DELETE_WINDOW`, taken as the Win32 close box, and so is the window destroyed under its owner; a
-  map the X server refuses fails the open. The window is a minimal XEmbed embedder (embedded notify to
+  map the X server refuses fails the open. It opens centred on the monitor the main window is on
+  (`set_placement` from `plugin_open_editor`; Hyprland places an X11 window by its own geometry, and
+  the main window is a Wayland client no X11 hint can name). The window is a minimal XEmbed embedder (embedded notify to
   every child, activation and focus to its `_XEMBED_INFO` children, else all). Teardown keeps the Windows order: VST3 `removed()` →
   the frame's run-loop handlers released → window destroyed; CLAP `gui.destroy` → window destroyed, the
   plugin's own timers and fds forgotten after its instance is destroyed. Proof: `docs/VERIFY.md` § Linux
