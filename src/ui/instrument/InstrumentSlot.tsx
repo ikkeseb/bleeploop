@@ -20,7 +20,7 @@ import {
   samePluginDescriptor,
 } from '../state/plugin-descriptor';
 import { SYNTHS } from '../state/instruments';
-import { jackHost, platform } from '../../platform';
+import { platform } from '../../platform';
 import { engineDevice, engineOpenFailure } from '../state/engine-store';
 import { PluginParams, PluginPlate, createPluginEditor } from './PluginControls';
 import { InputPick, LiveButton, SlotMeter, SlotVolume } from './SlotControls';
@@ -107,7 +107,7 @@ export function InstrumentSlot(props: { slot: 0 | 1; returnFocus?: (el: HTMLElem
           : slotOff()[slotIdx]
             ? 'off'
             : slotIds()[slotIdx];
-  const ask = slotIdx === 1 ? 'Add a second sound' : jackHost ? 'Pick a sound' : 'Pick your amp-sim';
+  const ask = slotIdx === 1 ? 'Add a second sound' : 'Pick your amp-sim';
   // What the plate's name reads: the plugin's or synth's name, else the picker's own words.
   const sourceName = () =>
     pending() ? 'Updating…' : plugin() ? plugin()!.name : unset() ? ask : (synth()?.name ?? 'Off');

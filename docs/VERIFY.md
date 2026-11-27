@@ -143,6 +143,30 @@ scan walks `~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap`, `CLAP_PATH`, then 
 the scan child: Archetype Petrucci X had not answered after 60 s (its Wine log showed TLS traffic), so
 the scan's 20 s bound lists it as failed. Plugin editor windows are not hosted on Linux yet.
 
+In the app: `verify/linux-app/plugin-probe.mjs` runs a debug app (built with `build.devUrl`
+`http://127.0.0.1:14937`, as § Linux desktop audio builds it) on a private PipeWire graph of two null
+sinks, its own X display and a temporary HOME, with the test plugins as its only plugin folders, and
+picks the CLAP one in slot A and the VST3 one in slot B through the slots' own pickers. Each must load,
+show its name on the slot and list its Gain. Xvfb is not installed on the Omarchy PC: without root,
+extract the `xorg-server-xvfb` package into a folder and pass its binary as `XVFB`.
+
+```sh
+XVFB=/path/to/Xvfb node verify/linux-app/plugin-probe.mjs src-tauri/target/debug/app /tmp/lf-plugins /tmp/probe.png
+```
+
+## Linux AppImage
+
+`sh scripts/linux-appimage.sh` builds `src-tauri/target/release/bundle/appimage/BleepLoop-x86_64.AppImage`
+(the script's header says what it changes in Tauri's bundle step and why). It runs on the Omarchy PC
+without FUSE 2 and prints its version (`--version`, before Tauri starts). The smoke test starts it as a
+click would, on the same private graph, display and HOME, and passes when it logs its start and its
+plugin scan and still runs; then it closes it:
+
+```sh
+XVFB=/path/to/Xvfb sh verify/linux-app/appimage-smoke.sh \
+  src-tauri/target/release/bundle/appimage/BleepLoop-x86_64.AppImage /tmp/appimage.png /tmp/lf-plugins
+```
+
 ## Linux JACK device probe
 
 The standalone crate in `verify/linux-audio/` runs `lf-engine` in one duplex JACK callback.

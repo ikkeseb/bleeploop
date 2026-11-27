@@ -288,6 +288,12 @@ pub fn run() {
         // before any window exists. The frontend requests the probe (`plugin_asio_probe`) after the UI
         // is up and only if the saved preference is on — `asio_startup.rs` owns the rules.
         // `--disable-asio` is the escape hatch: no probe this launch, whatever the preference says.
+        // The Linux app's headless start check (an AppImage's smoke test): the version, before Tauri.
+        #[cfg(target_os = "linux")]
+        if args.iter().any(|a| a == "--version") {
+            println!("BleepLoop {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
         #[cfg(windows)]
         if args.iter().any(|a| a == "--disable-asio") {
             audio_output::set_asio_disabled_by_flag();
