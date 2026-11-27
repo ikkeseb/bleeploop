@@ -555,9 +555,6 @@ impl OwnedPlugin for Clap {
     }
 
     fn idle(&mut self) -> bool {
-        // Linux: the plugin's timers and fds the pump found due (an X11 editor draws through them).
-        #[cfg(target_os = "linux")]
-        dispatch_run_loop(&mut self.instance);
         // The plugin's `closed` (maybe from its own window thread), for either editor form: acked
         // here, a GUI it destroyed with `destroy` alone (no hide, no resize first).
         let closed_by_plugin = self.editor_closed.take().filter(|_| !matches!(self.editor, EditorSlot::Closed));
@@ -572,6 +569,10 @@ impl OwnedPlugin for Clap {
         if closed {
             self.editor_close();
         }
+        // Linux: the plugin's timers and fds the pump found due (an X11 editor draws through them),
+        // after a closed editor is torn down: a window destroyed under its owner gets no repaint.
+        #[cfg(target_os = "linux")]
+        dispatch_run_loop(&mut self.instance);
         closed
     }
 
