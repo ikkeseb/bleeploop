@@ -8,7 +8,13 @@
 //! XID as a pointer-sized integer. The window sets `WM_DELETE_WINDOW`: a window manager's close
 //! arrives as that ClientMessage and makes `close_requested()` true, which the owner tears down as it
 //! does the Win32 close box. Fixed size (min = max size hints), as the Win32 window is; the plugin's
-//! own resize requests land in `set_client_size`. A test build maps the window at creation (the CLAP
+//! own resize requests land in `set_client_size`. The window's own `ConfigureNotify` records the size
+//! it really has (`client_size`); **known limit:** a window manager that configures it to another size
+//! is logged, but the plugin is not told (no renegotiation). Creation, its properties and its map are
+//! checked requests, so an open the X server refused fails. The window is a minimal XEmbed embedder:
+//! the plugin's window gets `XEMBED_EMBEDDED_NOTIFY` when it arrives and the top-level's focus as
+//! `XEMBED_WINDOW_(DE)ACTIVATE` + `XEMBED_FOCUS_IN`/`OUT` (JUCE waits for these); nothing more of the
+//! spec (no accelerators, no tab chain, no key forwarding). A test build maps the window at creation (the CLAP
 //! open shows it only outside tests, and an unmapped parent draws nothing); the Linux tests that open
 //! one need `DISPLAY`, which only a private Xvfb gives them.
 //!
@@ -35,10 +41,12 @@ use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 use x11rb::connection::Connection;
+use x11rb::cookie::VoidCookie;
+use x11rb::errors::ConnectionError;
 use x11rb::properties::WmSizeHints;
 use x11rb::protocol::xproto::{
-    AtomEnum, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, PropMode, StackMode,
-    WindowClass,
+    AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, NotifyDetail,
+    NotifyMode, PropMode, StackMode, WindowClass,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -207,15 +215,20 @@ impl Sources {
     }
 
     /// The next queued callback whose registration still stands (an earlier callback may have
-    /// unregistered it).
+    /// unregistered it). An fd's queued bits are cut to its interest as it stands now (an earlier
+    /// callback may have modified it), and an fd left with none is dropped.
     fn next_ready(&mut self) -> Option<Ready> {
         while let Some(r) = self.ready.pop_front() {
-            let live = match r {
-                Ready::Fd(fd, _) => self.has_fd(fd),
-                Ready::Timer(id) => self.has_timer(id),
-            };
-            if live {
-                return Some(r);
+            match r {
+                Ready::Fd(fd, bits) => {
+                    let Some(&(_, interest)) = self.fds.iter().find(|&&(f, _)| f == fd) else { continue };
+                    let bits = bits & (interest | FD_ERROR);
+                    if bits != 0 {
+                        return Some(Ready::Fd(fd, bits));
+                    }
+                }
+                Ready::Timer(id) if self.has_timer(id) => return Some(r),
+                Ready::Timer(_) => {}
             }
         }
         None
@@ -270,10 +283,83 @@ fn poll(fds: &mut [libc::pollfd], timeout_ms: libc::c_int) {
 
 // ---- the owner thread's X connection ---------------------------------------------------------------
 
+/// XEmbed messages and the details this embedder sends (XEmbed spec 0.5).
+const XEMBED_EMBEDDED_NOTIFY: u32 = 0;
+const XEMBED_WINDOW_ACTIVATE: u32 = 1;
+const XEMBED_WINDOW_DEACTIVATE: u32 = 2;
+const XEMBED_FOCUS_IN: u32 = 4;
+const XEMBED_FOCUS_OUT: u32 = 5;
+const XEMBED_FOCUS_CURRENT: u32 = 0;
+
+/// One editor window as this thread knows it. Pure bookkeeping: the X calls are `Display`'s.
 struct Window {
     xid: u32,
+    /// The size the window has: what this host asked, until a configure says otherwise.
     size: (u32, u32),
+    /// The size this host last asked for.
+    asked: (u32, u32),
+    /// The sequence number of the last resize request: a configure the server sent before it
+    /// processed that request is stale.
+    asked_seq: u64,
     closed: bool,
+    /// The plugin's window embedded in this one (its first child), once it arrived.
+    child: Option<u32>,
+    /// The top-level has the focus (the XEmbed "window active" state).
+    active: bool,
+}
+
+/// What an embedded child is told about its embedder's focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Activation {
+    Active,
+    Inactive,
+}
+
+impl Window {
+    fn new(xid: u32, size: (u32, u32)) -> Window {
+        Window { xid, size, asked: size, asked_seq: 0, closed: false, child: None, active: false }
+    }
+
+    /// A child was created in or reparented into this window: the one to embed, when it is the
+    /// first.
+    fn child_arrived(&mut self, child: u32) -> Option<u32> {
+        if self.child.is_some() || child == self.xid {
+            return None;
+        }
+        self.child = Some(child);
+        Some(child)
+    }
+
+    /// A child was destroyed or reparented away.
+    fn child_left(&mut self, child: u32) {
+        if self.child == Some(child) {
+            self.child = None;
+        }
+    }
+
+    /// The top-level's `FocusIn`/`FocusOut`: what to tell the child, when the window's active state
+    /// changed. A grab's focus round trip and focus moving to or from the child itself (an inferior)
+    /// change nothing.
+    fn focus(&mut self, focus_in: bool, detail: NotifyDetail, mode: NotifyMode) -> Option<(u32, Activation)> {
+        if matches!(mode, NotifyMode::GRAB | NotifyMode::UNGRAB) || matches!(detail, NotifyDetail::INFERIOR | NotifyDetail::POINTER) {
+            return None;
+        }
+        if self.active == focus_in {
+            return None;
+        }
+        self.active = focus_in;
+        Some((self.child?, if focus_in { Activation::Active } else { Activation::Inactive }))
+    }
+
+    /// The window's own `ConfigureNotify` (sequence `seq`): the size it has now, unless the server
+    /// sent it before it took the last resize. True when that size is not the one asked.
+    fn configured(&mut self, size: (u32, u32), seq: u64) -> bool {
+        if seq < self.asked_seq {
+            return false;
+        }
+        self.size = size;
+        size != self.asked
+    }
 }
 
 struct Display {
@@ -284,6 +370,7 @@ struct Display {
     wm_delete: u32,
     net_wm_name: u32,
     utf8_string: u32,
+    xembed: u32,
     windows: Vec<Window>,
 }
 
@@ -300,67 +387,85 @@ impl Display {
             let s = conn.setup().roots.get(screen).ok_or("the X display has no such screen")?;
             (s.root, s.black_pixel)
         };
-        let cookies = [b"WM_PROTOCOLS".as_slice(), b"WM_DELETE_WINDOW", b"_NET_WM_NAME", b"UTF8_STRING"]
+        let cookies = [b"WM_PROTOCOLS".as_slice(), b"WM_DELETE_WINDOW", b"_NET_WM_NAME", b"UTF8_STRING", b"_XEMBED"]
             .map(|name| conn.intern_atom(false, name));
-        let mut atoms = [0u32; 4];
+        let mut atoms = [0u32; 5];
         for (atom, cookie) in atoms.iter_mut().zip(cookies) {
             *atom = cookie?.reply()?.atom;
         }
-        let [wm_protocols, wm_delete, net_wm_name, utf8_string] = atoms;
-        Ok(Display { conn, root, black, wm_protocols, wm_delete, net_wm_name, utf8_string, windows: Vec::new() })
+        let [wm_protocols, wm_delete, net_wm_name, utf8_string, xembed] = atoms;
+        Ok(Display { conn, root, black, wm_protocols, wm_delete, net_wm_name, utf8_string, xembed, windows: Vec::new() })
     }
 
     fn window(&mut self, xid: u32) -> Option<&mut Window> {
         self.windows.iter_mut().find(|w| w.xid == xid)
     }
 
+    /// Create the window, its properties and (in a test build) its map as checked requests: an open
+    /// the X server refused is an error, never a success with no window. A failed step destroys what
+    /// was created.
     fn create(&mut self, width: u32, height: u32, title: &str) -> XResult<u32> {
         let (w, h) = (side(width), side(height));
-        let conn = &self.conn;
-        let xid = conn.generate_id()?;
-        let aux = CreateWindowAux::new().background_pixel(self.black).event_mask(EventMask::STRUCTURE_NOTIFY);
-        conn.create_window(
-            x11rb::COPY_DEPTH_FROM_PARENT,
-            xid,
-            self.root,
-            0,
-            0,
-            w as u16,
-            h as u16,
-            0,
-            WindowClass::INPUT_OUTPUT,
-            x11rb::COPY_FROM_PARENT,
-            &aux,
-        )?;
-        conn.change_property32(PropMode::REPLACE, xid, self.wm_protocols, AtomEnum::ATOM, &[self.wm_delete])?;
-        conn.change_property8(PropMode::REPLACE, xid, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes())?;
-        conn.change_property8(PropMode::REPLACE, xid, self.net_wm_name, self.utf8_string, title.as_bytes())?;
-        conn.change_property8(PropMode::REPLACE, xid, AtomEnum::WM_CLASS, AtomEnum::STRING, WM_CLASS)?;
-        fixed_size(conn, xid, w, h)?;
-        if cfg!(test) {
-            conn.map_window(xid)?;
+        let xid = self.conn.generate_id()?;
+        // Structure: its own close, configure and destroy; substructure: the plugin's window arriving
+        // in it (XEmbed); focus: the XEmbed activation the child is told about.
+        let events = EventMask::STRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_NOTIFY | EventMask::FOCUS_CHANGE;
+        let aux = CreateWindowAux::new().background_pixel(self.black).event_mask(events);
+        self.conn
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                xid,
+                self.root,
+                0,
+                0,
+                w as u16,
+                h as u16,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                x11rb::COPY_FROM_PARENT,
+                &aux,
+            )?
+            .check()?;
+        let set_up = || -> XResult<()> {
+            let conn = &self.conn;
+            conn.change_property32(PropMode::REPLACE, xid, self.wm_protocols, AtomEnum::ATOM, &[self.wm_delete])?.check()?;
+            conn.change_property8(PropMode::REPLACE, xid, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes())?.check()?;
+            conn.change_property8(PropMode::REPLACE, xid, self.net_wm_name, self.utf8_string, title.as_bytes())?.check()?;
+            conn.change_property8(PropMode::REPLACE, xid, AtomEnum::WM_CLASS, AtomEnum::STRING, WM_CLASS)?.check()?;
+            fixed_size(conn, xid, w, h)?.check()?;
+            if cfg!(test) {
+                conn.map_window(xid)?.check()?;
+            }
+            Ok(())
+        };
+        // Checked: the server has created the window before the plugin, on a connection of its own,
+        // is handed its id.
+        if let Err(e) = set_up() {
+            let _ = self.conn.destroy_window(xid);
+            let _ = self.conn.flush();
+            return Err(e);
         }
-        // The plugin reparents into this window over a connection of its own: the server must have
-        // created it before the plugin is handed its id.
-        conn.sync()?;
-        self.windows.push(Window { xid, size: (w, h), closed: false });
+        self.windows.push(Window::new(xid, (w, h)));
         Ok(xid)
     }
 
     fn resize(&mut self, xid: u32, width: u32, height: u32) -> XResult<(u32, u32)> {
         let (w, h) = (side(width), side(height));
         // Hints first: a window manager holds a configure against the min/max size it last read.
-        fixed_size(&self.conn, xid, w, h)?;
-        self.conn.configure_window(xid, &ConfigureWindowAux::new().width(w).height(h))?;
+        drop(fixed_size(&self.conn, xid, w, h)?);
+        let seq = self.conn.configure_window(xid, &ConfigureWindowAux::new().width(w).height(h))?.sequence_number();
         self.conn.flush()?;
         if let Some(win) = self.window(xid) {
             win.size = (w, h);
+            win.asked = (w, h);
+            win.asked_seq = seq;
         }
         Ok((w, h))
     }
 
+    /// Map (checked) and raise.
     fn show(&self, xid: u32) -> XResult<()> {
-        self.conn.map_window(xid)?;
+        self.conn.map_window(xid)?.check()?;
         self.conn.configure_window(xid, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE))?;
         self.conn.flush()?;
         Ok(())
@@ -372,23 +477,50 @@ impl Display {
         let _ = self.conn.flush();
     }
 
+    /// An `_XEMBED` message to the embedded child, as the spec sends it (no event mask).
+    fn xembed(&self, child: u32, message: u32, detail: u32, data1: u32) {
+        let event = ClientMessageEvent::new(32, child, self.xembed, [x11rb::CURRENT_TIME, message, detail, data1, 0]);
+        let _ = self.conn.send_event(false, child, EventMask::NO_EVENT, event);
+    }
+
+    /// Tell the child its embedder became active (with the focus on the child) or inactive.
+    fn activate(&self, child: u32, activation: Activation) {
+        match activation {
+            Activation::Active => {
+                self.xembed(child, XEMBED_WINDOW_ACTIVATE, 0, 0);
+                self.xembed(child, XEMBED_FOCUS_IN, XEMBED_FOCUS_CURRENT, 0);
+            }
+            Activation::Inactive => {
+                self.xembed(child, XEMBED_WINDOW_DEACTIVATE, 0, 0);
+                self.xembed(child, XEMBED_FOCUS_OUT, 0, 0);
+            }
+        }
+    }
+
+    /// A child arrived: `XEMBED_EMBEDDED_NOTIFY` (data1: the embedder, data2: protocol version 0),
+    /// then its activation when the window is active already. The minimal embedder JUCE and other
+    /// toolkits expect; no accelerators, no tab chain, and no `XSetInputFocus` (the spec keeps the X
+    /// focus on the embedder: a plugin that wants keys takes the focus itself on a click).
+    fn embed(&mut self, host: u32, child: u32) {
+        let Some(win) = self.window(host) else { return };
+        let Some(child) = win.child_arrived(child) else { return };
+        let active = win.active;
+        self.xembed(child, XEMBED_EMBEDDED_NOTIFY, 0, host);
+        if active {
+            self.activate(child, Activation::Active);
+        }
+    }
+
     /// Take every queued X event: a window manager's `WM_DELETE_WINDOW` marks its window closed and
-    /// unmaps it (instant feedback; the owner destroys it after the plugin let go). A broken
-    /// connection closes every window, so each editor tears down and the next open reconnects.
+    /// unmaps it (instant feedback; the owner destroys it after the plugin let go); the plugin's
+    /// window arriving and the window's focus drive XEmbed; a configure records the size the window
+    /// has. A broken connection closes every window, so each editor tears down and the next open
+    /// reconnects.
     fn drain(&mut self) {
         loop {
-            match self.conn.poll_for_event() {
-                Ok(Some(Event::ClientMessage(ev)))
-                    if ev.type_ == self.wm_protocols && ev.format == 32 && ev.data.as_data32()[0] == self.wm_delete =>
-                {
-                    if let Some(win) = self.window(ev.window) {
-                        win.closed = true;
-                        let _ = self.conn.unmap_window(ev.window);
-                        let _ = self.conn.flush();
-                    }
-                }
-                Ok(Some(_)) => {}
-                Ok(None) => return,
+            let (event, seq) = match self.conn.poll_for_event_with_sequence() {
+                Ok(Some(next)) => next,
+                Ok(None) => break,
                 Err(e) => {
                     log::error!("[plugin_host] the editor's X connection broke ({e}); closing its windows");
                     for win in &mut self.windows {
@@ -396,7 +528,55 @@ impl Display {
                     }
                     return;
                 }
+            };
+            match event {
+                Event::ClientMessage(ev)
+                    if ev.type_ == self.wm_protocols && ev.format == 32 && ev.data.as_data32()[0] == self.wm_delete =>
+                {
+                    if let Some(win) = self.window(ev.window) {
+                        win.closed = true;
+                        let _ = self.conn.unmap_window(ev.window);
+                    }
+                }
+                Event::CreateNotify(ev) => self.embed(ev.parent, ev.window),
+                Event::ReparentNotify(ev) if ev.event != ev.window => {
+                    if ev.parent == ev.event {
+                        self.embed(ev.event, ev.window);
+                    } else if let Some(win) = self.window(ev.event) {
+                        win.child_left(ev.window);
+                    }
+                }
+                Event::DestroyNotify(ev) if ev.event != ev.window => {
+                    if let Some(win) = self.window(ev.event) {
+                        win.child_left(ev.window);
+                    }
+                }
+                Event::FocusIn(ev) => self.focus(ev.event, true, ev.detail, ev.mode),
+                Event::FocusOut(ev) => self.focus(ev.event, false, ev.detail, ev.mode),
+                Event::ConfigureNotify(ev) if ev.event == ev.window => {
+                    let size = (u32::from(ev.width), u32::from(ev.height));
+                    if let Some(win) = self.window(ev.window) {
+                        if win.configured(size, seq) {
+                            log::info!(
+                                "[plugin_host] the editor window is {}x{}, not the {}x{} asked (the plugin keeps its own size)",
+                                size.0,
+                                size.1,
+                                win.asked.0,
+                                win.asked.1
+                            );
+                        }
+                    }
+                }
+                _ => {}
             }
+        }
+        let _ = self.conn.flush();
+    }
+
+    fn focus(&mut self, xid: u32, focus_in: bool, detail: NotifyDetail, mode: NotifyMode) {
+        let Some(win) = self.window(xid) else { return };
+        if let Some((child, activation)) = win.focus(focus_in, detail, mode) {
+            self.activate(child, activation);
         }
     }
 }
@@ -407,10 +587,9 @@ fn side(pixels: u32) -> u32 {
 }
 
 /// Pin the window's size for a window manager (min = max), as the Win32 window has no sizing frame.
-fn fixed_size(conn: &RustConnection, xid: u32, w: u32, h: u32) -> XResult<()> {
+fn fixed_size(conn: &RustConnection, xid: u32, w: u32, h: u32) -> Result<VoidCookie<'_, RustConnection>, ConnectionError> {
     let hints = WmSizeHints { min_size: Some((w as i32, h as i32)), max_size: Some((w as i32, h as i32)), ..WmSizeHints::new() };
-    hints.set_normal_hints(conn, xid)?;
-    Ok(())
+    hints.set_normal_hints(conn, xid)
 }
 
 #[derive(Default)]
@@ -516,12 +695,14 @@ pub(super) fn create_host_window(width: u32, height: u32) -> Result<HostWindow, 
     })
     .ok_or_else(|| "the owner thread is exiting".to_string())??;
     let _ = OWN_WINDOW.try_with(|own| own.set(created));
+    // The XID, for a probe on the display to find the window (and check it is gone after the close).
+    log::info!("[plugin_host] editor window {created:#x} open");
     Ok(HostWindow { hwnd: HWND::from_xid(created) })
 }
 
-/// The window's client size in pixels: the size this host last gave it (0×0 for a window it does not
-/// hold). Under a window manager a configure lands asynchronously, so the size asked is the answer,
-/// never a geometry read back mid-flight.
+/// The window's client size in pixels (0×0 for a window it does not hold): the size the last
+/// configure the owner's pump took says it has, else the size asked. Under a window manager a
+/// configure lands asynchronously, so right after a resize this is the size asked.
 pub(super) fn client_size(hwnd: HWND) -> (u32, u32) {
     let Some(xid) = hwnd.xid() else { return (0, 0) };
     with_owner(|o| o.display.as_mut().and_then(|d| d.window(xid)).map(|w| w.size))
@@ -614,6 +795,12 @@ pub(super) fn unregister_timer(id: u32) -> bool {
     with_owner(|o| o.sources.remove_timer(id)).unwrap_or(false)
 }
 
+/// How many fds and timers this thread's registry holds.
+#[cfg(test)]
+pub(super) fn registered() -> (usize, usize) {
+    with_owner(|o| (o.sources.fds.len(), o.sources.timers.len())).unwrap_or_default()
+}
+
 /// Drop every fd and timer registered on this thread, with what is queued for them: the plugin is
 /// gone and must never be called back.
 pub(super) fn forget_registrations() {
@@ -630,6 +817,34 @@ pub(super) unsafe fn GetWindowThreadProcessId(hwnd: HWND, _pid: Option<*mut u32>
         GetCurrentThreadId()
     } else {
         0
+    }
+}
+
+/// The owner thread of a plugin's host object (the CLAP host's main-thread data, the VST3 frame):
+/// the thread that created it. The registry is per thread, so a registration must come from that
+/// thread: a JUCE module shares one message loop across its instances and can call instance B's
+/// host from instance A's owner. The editor-affinity rule (`src/ui/state/instrument.ts`
+/// `editorAffinityBlocker`) keeps that from happening; this refuses what gets past it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct OwnerThread(u32);
+
+impl Default for OwnerThread {
+    /// The calling thread.
+    fn default() -> Self {
+        // SAFETY: the shim only reads and sets this thread's own token.
+        OwnerThread(unsafe { GetCurrentThreadId() })
+    }
+}
+
+impl OwnerThread {
+    /// Whether the calling thread is the owner; a call from any other is logged once here, and the
+    /// caller refuses it without touching any state.
+    pub(super) fn admits(self, what: &str) -> bool {
+        if self == OwnerThread::default() {
+            return true;
+        }
+        log::warn!("[plugin_host] the plugin called {what} off its owner thread; refused");
+        false
     }
 }
 
@@ -737,6 +952,62 @@ mod tests {
         assert!(s.remove_fd(5));
         assert!(!s.remove_fd(5));
         assert_eq!(s.wait(Instant::now(), ms(20)), ms(20));
+    }
+
+    /// XEmbed bookkeeping: the first child is the one embedded (once), the top-level's focus is told
+    /// to it only when the active state changes, and a grab or a focus move into the child itself is
+    /// no change.
+    #[test]
+    fn the_embedder_embeds_its_first_child_and_follows_the_top_level_focus() {
+        let (n, m) = (NotifyDetail::NONLINEAR, NotifyMode::NORMAL);
+        let mut w = Window::new(10, (400, 300));
+        assert_eq!(w.focus(true, n, m), None, "active, but no child to tell yet");
+        assert_eq!(w.child_arrived(10), None, "never itself");
+        assert_eq!(w.child_arrived(11), Some(11));
+        assert_eq!(w.child_arrived(11), None, "embedded once");
+        assert_eq!(w.child_arrived(12), None, "one client");
+        assert_eq!(w.focus(true, n, m), None, "already active");
+        assert_eq!(w.focus(false, NotifyDetail::INFERIOR, m), None, "the focus went into the child");
+        assert_eq!(w.focus(false, n, NotifyMode::GRAB), None, "a grab");
+        assert_eq!(w.focus(false, n, m), Some((11, Activation::Inactive)));
+        assert_eq!(w.focus(true, n, m), Some((11, Activation::Active)));
+        w.child_left(12);
+        assert_eq!(w.child, Some(11), "not the embedded child");
+        w.child_left(11);
+        assert_eq!(w.child_arrived(12), Some(12), "the next child is embedded");
+    }
+
+    /// A configure records the size the window has; one the server sent before it took the last
+    /// resize is stale; a size other than the one asked is reported.
+    #[test]
+    fn a_configure_records_the_real_size_unless_it_is_stale() {
+        let mut w = Window::new(10, (400, 300));
+        assert!(!w.configured((400, 300), 5), "the size asked");
+        (w.asked, w.asked_seq) = ((800, 600), 9);
+        assert!(!w.configured((400, 300), 8), "sent before the resize: stale");
+        assert_eq!(w.size, (400, 300));
+        assert!(w.configured((640, 480), 9), "the window manager gave another size");
+        assert_eq!(w.size, (640, 480), "and that is the size it has");
+        assert!(!w.configured((800, 600), 12));
+        assert_eq!(w.size, (800, 600));
+    }
+
+    /// Readiness queued before a callback modified an fd's interest is cut to the new interest when
+    /// it is taken: a dropped WRITE interest is never reported, an error always is.
+    #[test]
+    fn queued_readiness_follows_a_modified_interest() {
+        let mut s = Sources::default();
+        assert!(s.add_fd(5, FD_READ | FD_WRITE));
+        assert!(s.add_fd(6, FD_WRITE));
+        s.queue_fd(5, FD_READ | FD_WRITE);
+        s.queue_fd(6, FD_WRITE);
+        // An earlier callback drops both fds' WRITE interest after the poll.
+        assert!(s.modify_fd(5, FD_READ));
+        assert!(s.modify_fd(6, 0));
+        assert_eq!(s.next_ready(), Some(Ready::Fd(5, FD_READ)), "WRITE no longer asked for");
+        assert_eq!(s.next_ready(), None, "fd 6 asks for nothing: no callback");
+        s.queue_fd(6, FD_ERROR);
+        assert_eq!(s.next_ready(), Some(Ready::Fd(6, FD_ERROR)), "an error is still reported");
     }
 
     /// The pieces `wait_for_input` and `pump_thread_messages` put together, over a real pipe: a

@@ -128,7 +128,12 @@ The Linux app hosts CLAP and VST3 plugins in its slots with the Windows host's o
 render offline on the idle engine, no device and nothing audible: a steady input through slot 0 with
 GO LIVE must come out ×0.5 at the plugin's default, ×1.5 after a host-set parameter, ×1.5 again once a
 rebuild at 44.1 kHz has evicted and re-activated it, dry after the unload, and ×1.5 at the next load
-from the tone the unload saved. A pass-through build of the plugin fails the first check.
+from the tone the unload saved. A pass-through build of the plugin fails the first check. A third
+runs the CLAP plugin's own 10 ms timer and fd (a socket pair it writes on each tick) through the
+owner loop with no editor and no display: both counts (its TICKS and FD WAKES parameters) must rise
+while it is loaded, and the plugin aborts the process on a callback after its `destroy`. The same
+filter selects the Surge editor tests below; without `DISPLAY` and their plugin they print `SKIPPED`
+and pass.
 
 ```sh
 sh verify/linux-plugins/build.sh /tmp/lf-plugins
@@ -148,10 +153,11 @@ dialogs on whatever display the scan child has.
 Plugin editors on Linux (`src-tauri/src/host/editor_window_linux.rs`): two more ignored tests open
 Surge XT's CLAP and VST3 editors from slot 0 on a private X display. Each must show a window that the
 plugin draws into, take an XTEST drag that moves a parameter the host reads back (VST3: and reaches the
-host as `performEdit`), stay open, drawing and taking input across a rebuild at 44.1 kHz whose
-re-activated unit plays a note, close by `CloseEditor` and by a `WM_DELETE_WINDOW` sent as a window
-manager sends it (arriving as `EditorClosed`), and leave no window behind after either or after an
-unload with it open. No window manager runs there; `LF_TEST_SHOTS` keeps a screenshot of each step.
+host as `performEdit`), stay open across a rebuild at 44.1 kHz whose re-activated unit plays a note,
+then take a new drag that moves a parameter and redraw the window for it, close by `CloseEditor` and by
+a `WM_DELETE_WINDOW` sent as a window manager sends it, only after the window advertised it in
+`WM_PROTOCOLS` (arriving as `EditorClosed`), and leave no window behind after either or after an
+unload with it open. These have not run yet: no Xvfb has been available. No window manager runs there; `LF_TEST_SHOTS` keeps a screenshot of each step.
 Surge reads its factory data from `$HOME/.local/share/surge-xt`, so the run gets a temporary HOME:
 
 ```sh
@@ -170,8 +176,9 @@ show its name on the slot and list its Gain; then Off in slot A must unload its 
 engine. Given an unpacked Surge XT release as a fourth argument, the page then picks Surge XT (CLAP) in
 slot A, whose editor opens with the pick, closes and reopens it with the slot's editor control, and
 picks Surge XT (VST3) there; at each open the runner must find the editor window on the display
-(`xprop`: the plugin's name, the host's `WM_CLASS`) and screenshots the whole display beside
-`probe.png`. Xvfb is not installed on the Omarchy PC: without root,
+(`xprop`: the plugin's name, the host's `WM_CLASS`), check that the window the app logged
+(`editor window 0x… open`) is alive, and screenshot the whole display beside `probe.png`; after the
+close by the control and after the unload, that window must be gone (`xprop -id` fails). Xvfb is not installed on the Omarchy PC: without root,
 extract the `xorg-server-xvfb` package into a folder and pass its binary as `XVFB`.
 
 ```sh

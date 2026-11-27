@@ -316,6 +316,9 @@ struct LfPlugFrame {
     hwnd: AtomicIsize,
     #[cfg(target_os = "linux")]
     run_loop: RunLoopHandlers,
+    /// The thread that made the frame (the owner): the only one whose `IRunLoop` calls are taken.
+    #[cfg(target_os = "linux")]
+    owner: super::super::editor_window::OwnerThread,
 }
 impl LfPlugFrame {
     fn new() -> Self {
@@ -323,6 +326,8 @@ impl LfPlugFrame {
             hwnd: AtomicIsize::new(0),
             #[cfg(target_os = "linux")]
             run_loop: RunLoopHandlers::default(),
+            #[cfg(target_os = "linux")]
+            owner: Default::default(),
         }
     }
 }
@@ -383,10 +388,14 @@ impl LfPlugFrame {
     }
 }
 
-/// Steinberg's Linux run loop for a view's GUI: its fds and timers join the owner's `poll()`.
+/// Steinberg's Linux run loop for a view's GUI: its fds and timers join the owner's `poll()`. A call
+/// off the owner thread is refused with `kResultFalse` before it touches anything (`OwnerThread`).
 #[cfg(target_os = "linux")]
 impl IRunLoopTrait for LfPlugFrame {
     unsafe fn registerEventHandler(&self, handler: *mut IEventHandler, fd: FileDescriptor) -> tresult {
+        if !self.owner.admits("IRunLoop::registerEventHandler") {
+            return kResultFalse;
+        }
         let Some(handler) = ComRef::from_raw(handler).map(|h| h.to_com_ptr()) else { return kInvalidArgument };
         if !super::super::editor_window::register_fd(fd, super::super::editor_window::FD_READ) {
             return kResultFalse;
@@ -395,6 +404,9 @@ impl IRunLoopTrait for LfPlugFrame {
         kResultTrue
     }
     unsafe fn unregisterEventHandler(&self, handler: *mut IEventHandler) -> tresult {
+        if !self.owner.admits("IRunLoop::unregisterEventHandler") {
+            return kResultFalse;
+        }
         let gone: Vec<_> = {
             let mut fds = self.run_loop.fds.borrow_mut();
             let (gone, kept) = fds.drain(..).partition(|(_, h)| h.as_ptr() == handler);
@@ -407,12 +419,18 @@ impl IRunLoopTrait for LfPlugFrame {
         if gone.is_empty() { kResultFalse } else { kResultTrue }
     }
     unsafe fn registerTimer(&self, handler: *mut ITimerHandler, milliseconds: TimerInterval) -> tresult {
+        if !self.owner.admits("IRunLoop::registerTimer") {
+            return kResultFalse;
+        }
         let Some(handler) = ComRef::from_raw(handler).map(|h| h.to_com_ptr()) else { return kInvalidArgument };
         let id = super::super::editor_window::register_timer(u32::try_from(milliseconds).unwrap_or(u32::MAX));
         self.run_loop.timers.borrow_mut().push((id, handler));
         kResultTrue
     }
     unsafe fn unregisterTimer(&self, handler: *mut ITimerHandler) -> tresult {
+        if !self.owner.admits("IRunLoop::unregisterTimer") {
+            return kResultFalse;
+        }
         let gone: Vec<_> = {
             let mut timers = self.run_loop.timers.borrow_mut();
             let (gone, kept) = timers.drain(..).partition(|(_, h)| h.as_ptr() == handler);
@@ -1672,5 +1690,60 @@ mod param_drain_tests {
         assert_eq!(first[7], (7, value(7)), "the change behind it waits");
         assert_eq!(block(&mut ring, &changes), vec![(new, value(new)), (5, 0.25), (7, 0.75)], "next block, in order");
         assert!(ring.is_empty());
+    }
+}
+
+/// The frame's `IRunLoop` refuses a call off the thread that made it, and leaves the frame's
+/// handlers and both threads' registries as they were.
+#[cfg(all(test, target_os = "linux"))]
+mod run_loop_owner_tests {
+    use super::super::super::editor_window::registered;
+    use super::*;
+
+    struct Tick;
+    impl Class for Tick {
+        type Interfaces = (ITimerHandler,);
+    }
+    impl ITimerHandlerTrait for Tick {
+        unsafe fn onTimer(&self) {}
+    }
+
+    /// The frame borrowed into another thread: the very call the frame must refuse.
+    struct Elsewhere<'a>(&'a LfPlugFrame);
+    // SAFETY: test only; the other thread only calls the refusing entry points.
+    unsafe impl Send for Elsewhere<'_> {}
+
+    #[test]
+    fn a_run_loop_call_off_the_owner_thread_is_refused() {
+        let frame = LfPlugFrame::new();
+        let tick = ComWrapper::new(Tick);
+        let handler = tick.as_com_ref::<ITimerHandler>().unwrap().as_ptr();
+        let (borrowed, raw) = (Elsewhere(&frame), handler as usize);
+        let (codes, elsewhere) = std::thread::scope(|s| {
+            s.spawn(move || {
+                let frame = { borrowed }.0;
+                let handler = raw as *mut ITimerHandler;
+                // SAFETY: a live handler and a null one: the frame refuses before it reads either.
+                let codes = unsafe {
+                    [
+                        frame.registerTimer(handler, 10),
+                        frame.unregisterTimer(handler),
+                        frame.registerEventHandler(std::ptr::null_mut(), 0),
+                        frame.unregisterEventHandler(std::ptr::null_mut()),
+                    ]
+                };
+                (codes, registered())
+            })
+            .join()
+            .unwrap()
+        });
+        assert_eq!(codes, [kResultFalse; 4], "every call off the owner thread is refused");
+        assert_eq!(elsewhere, (0, 0), "the foreign thread's registry stays empty");
+        assert!(frame.run_loop.timers.borrow().is_empty(), "the frame holds no handler");
+        // SAFETY: the owner's own call, with a live handler.
+        assert_eq!(unsafe { frame.registerTimer(handler, 10) }, kResultTrue, "the owner's call is taken");
+        assert_eq!(registered(), (0, 1));
+        frame.forget_run_loop();
+        assert_eq!(registered(), (0, 0));
     }
 }

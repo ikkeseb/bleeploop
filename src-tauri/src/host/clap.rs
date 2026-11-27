@@ -506,6 +506,10 @@ struct LfMain {
     params_rescan: bool,
     /// The plugin's `clap_host_state.mark_dirty`: its state changed (engine mode saves its tone).
     state_dirty: bool,
+    /// The thread this instance was created on (its owner): the only one whose timer and fd
+    /// registrations are taken.
+    #[cfg(target_os = "linux")]
+    owner: super::editor_window::OwnerThread,
 }
 impl<'a> MainThreadHandler<'a> for LfMain {}
 impl HostStateImpl for LfMain {
@@ -514,26 +518,77 @@ impl HostStateImpl for LfMain {
     }
 }
 /// The plugin's timers and fds, run by the owner's loop on this (main) thread and called back from
-/// `Clap::idle` (`dispatch_run_loop`): what an embedded X11 editor draws and takes input with.
+/// `Clap::idle` (`dispatch_run_loop`): what an embedded X11 editor draws and takes input with. A call
+/// off the owner thread is refused (`OwnerThread`): it would land in the caller's registry.
+#[cfg(target_os = "linux")]
+const OFF_OWNER: HostError = HostError::Message("not the plugin's main thread");
 #[cfg(target_os = "linux")]
 impl HostTimerImpl for LfMain {
     fn register_timer(&mut self, period_ms: u32) -> Result<TimerId, HostError> {
+        if !self.owner.admits("timer-support.register_timer") {
+            return Err(OFF_OWNER);
+        }
         Ok(TimerId(super::editor_window::register_timer(period_ms)))
     }
     fn unregister_timer(&mut self, timer_id: TimerId) -> Result<(), HostError> {
+        if !self.owner.admits("timer-support.unregister_timer") {
+            return Err(OFF_OWNER);
+        }
         super::editor_window::unregister_timer(timer_id.0).then_some(()).ok_or(HostError::Message("no such timer"))
     }
 }
 #[cfg(target_os = "linux")]
 impl HostPosixFdImpl for LfMain {
     fn register_fd(&mut self, fd: std::os::fd::RawFd, flags: FdFlags) -> Result<(), HostError> {
+        if !self.owner.admits("posix-fd-support.register_fd") {
+            return Err(OFF_OWNER);
+        }
         super::editor_window::register_fd(fd, flags.bits()).then_some(()).ok_or(HostError::Message("fd already registered"))
     }
     fn modify_fd(&mut self, fd: std::os::fd::RawFd, flags: FdFlags) -> Result<(), HostError> {
+        if !self.owner.admits("posix-fd-support.modify_fd") {
+            return Err(OFF_OWNER);
+        }
         super::editor_window::modify_fd(fd, flags.bits()).then_some(()).ok_or(HostError::Message("fd not registered"))
     }
     fn unregister_fd(&mut self, fd: std::os::fd::RawFd) -> Result<(), HostError> {
+        if !self.owner.admits("posix-fd-support.unregister_fd") {
+            return Err(OFF_OWNER);
+        }
         super::editor_window::unregister_fd(fd).then_some(()).ok_or(HostError::Message("fd not registered"))
+    }
+}
+
+/// A timer or fd registration from a thread other than the instance's owner is refused and leaves
+/// both threads' registries as they were.
+#[cfg(all(test, target_os = "linux"))]
+mod owner_thread_tests {
+    use super::*;
+    use crate::host::editor_window::{registered, FD_READ};
+
+    #[test]
+    fn a_registration_off_the_owner_thread_is_refused() {
+        let mut main = LfMain::default();
+        let id = main.register_timer(10).expect("the owner registers");
+        assert_eq!(registered(), (0, 1));
+        let (main, elsewhere) = std::thread::spawn(move || {
+            let refused = [
+                main.register_timer(10).is_err(),
+                main.unregister_timer(id).is_err(),
+                main.register_fd(0, FdFlags::from_bits_truncate(FD_READ)).is_err(),
+                main.modify_fd(0, FdFlags::from_bits_truncate(FD_READ)).is_err(),
+                main.unregister_fd(0).is_err(),
+            ];
+            assert_eq!(refused, [true; 5], "every call off the owner thread is refused");
+            (main, registered())
+        })
+        .join()
+        .unwrap();
+        assert_eq!(elsewhere, (0, 0), "the foreign thread's registry stays empty");
+        assert_eq!(registered(), (0, 1), "the owner's timer still stands");
+        let mut main = main;
+        main.unregister_timer(id).expect("the owner unregisters");
+        assert_eq!(registered(), (0, 0));
     }
 }
 

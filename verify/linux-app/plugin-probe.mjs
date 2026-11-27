@@ -9,7 +9,9 @@
 // added to the plugin folders. The page then picks Surge XT (CLAP) in slot A, whose editor opens with
 // the pick; presses the slot's editor control to close it and again to reopen it; then picks Surge XT
 // (VST3) there. At each open the runner finds the editor window on the display (`xprop`, by the
-// plugin's name and the host's `WM_CLASS`) and screenshots the whole display beside SCREENSHOT.png.
+// plugin's name and the host's `WM_CLASS`), checks the window the app logged is alive, and screenshots
+// the whole display beside SCREENSHOT.png; after each close (by the control, by the unload) that window
+// must be gone (`xprop -id` fails).
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -81,6 +83,18 @@ if (surge) {
   await symlink(join(resolve(surge), 'share', 'surge-xt'), join(home, '.local', 'share', 'surge-xt'));
 }
 const shots = [];
+const closes = [];
+/** The editor window the app logged last (`editor window 0x… open`). */
+let lastWindow = null;
+/** Whether window `id` exists on the private display. */
+const windowAlive = (id) => {
+  try {
+    execFileSync('xprop', ['-display', display, '-id', id, 'WM_CLASS'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return true;
+  } catch {
+    return false;
+  }
+};
 /** The editor window on the private display, by the plugin's name: its WM_CLASS, or null. */
 const editorWindow = (name) => {
   try {
@@ -95,6 +109,8 @@ const outcome = await new Promise((done) => {
   for (const stream of [app.stdout, app.stderr]) {
     createInterface({ input: stream }).on('line', (line) => {
       if (/\[scan\]|plugin_host|error/i.test(line)) console.log(line);
+      const opened = line.match(/editor window (0x[0-9a-f]+) open/);
+      if (opened) lastWindow = opened[1];
       const at = line.indexOf('[linux-plugin-probe]');
       if (at === -1) return;
       const event = JSON.parse(line.slice(at + 20).trim().replace(/^"|"$/g, '').replaceAll('\\"', '"'));
@@ -105,8 +121,17 @@ const outcome = await new Promise((done) => {
           const found = editorWindow(event.name);
           const file = shot.replace(/\.png$/, '') + `-editor-${shots.length + 1}-${event.format}.png`;
           execFileSync('import', ['-display', display, '-window', 'root', file]);
-          shots.push({ ...event, window: found, file });
-          console.log('editor window:', found ?? 'NOT FOUND', '→', file);
+          const id = lastWindow;
+          shots.push({ ...event, window: found, id, alive: id !== null && windowAlive(id), file });
+          console.log('editor window:', found ?? 'NOT FOUND', id, '→', file);
+        });
+      }
+      if (event.kind === 'editor-closed') {
+        // The page holds still for 3 s after a close: the window the app made must be gone.
+        const id = lastWindow;
+        sleep(1500).then(() => {
+          closes.push({ ...event, id, gone: id !== null && !windowAlive(id) });
+          console.log('editor closed by', event.by, id, windowAlive(id ?? '0') ? 'STILL THERE' : 'gone');
         });
       }
       if (event.kind === 'done' || event.kind === 'failed') {
@@ -129,7 +154,12 @@ assert.equal(outcome.kind, 'done', outcome.error);
 console.log('PASS: both test plugins picked, loaded and listing their Gain in the app; slot A unloaded by Off');
 if (surge) {
   assert.equal(shots.length, 3, `three editor opens shot, got ${shots.length}`);
-  for (const s of shots) assert.match(s.window ?? '', /"bleeploop-plugin", "BleepLoop"/, `${s.format} editor window on the display`);
+  for (const s of shots) {
+    assert.match(s.window ?? '', /"bleeploop-plugin", "BleepLoop"/, `${s.format} editor window on the display`);
+    assert(s.alive, `the ${s.format} editor's window ${s.id} is alive`);
+  }
+  assert.equal(closes.length, 2, `two editor closes checked, got ${closes.length}`);
+  for (const c of closes) assert(c.gone, `the editor's window ${c.id} is gone after its close by ${c.by}`);
   console.log('PASS: Surge XT\'s CLAP and VST3 editors opened from slot A (pick, then its editor control) on the private display');
 }
 process.exit(0);

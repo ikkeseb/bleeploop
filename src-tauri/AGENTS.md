@@ -219,10 +219,12 @@ plugin-GUI work.
   x11rb; XWayland under a Wayland desktop): CLAP `GuiApiType::X11` embedded only (no floating try),
   VST3 `kPlatformTypeX11EmbedWindowID`. A Linux plugin GUI draws only if the host runs its fds and
   timers on its GUI thread: the VST3 frame answers `IRunLoop`, the CLAP host declares `timer-support`
-  and `posix-fd-support`, both register in the owner thread's registry, and the format's `idle` calls
-  them back after the turn's pump; while a hosted editor is open the owner's wait is one `poll()` over
+  and `posix-fd-support`, both register in the owner thread's registry (a call from any other thread
+  is refused: a JUCE module can call one instance's host from another's owner), and the format's `idle`
+  calls them back after the turn's pump; while a hosted editor is open the owner's wait is one `poll()` over
   its X connection, those fds and the nearest timer (≤ 20 ms). A window manager's close is
-  `WM_DELETE_WINDOW`, taken as the Win32 close box. Teardown keeps the Windows order: VST3 `removed()` →
+  `WM_DELETE_WINDOW`, taken as the Win32 close box. The window is a minimal XEmbed embedder (embedded
+  notify, activation and focus only). Teardown keeps the Windows order: VST3 `removed()` →
   the frame's run-loop handlers released → window destroyed; CLAP `gui.destroy` → window destroyed, the
   plugin's own timers and fds forgotten after its instance is destroyed. Proof: `docs/VERIFY.md` § Linux
   plugin hosting.

@@ -898,6 +898,37 @@ mod tests {
         gain_plugin_round_trip(PluginFormat::Clap, "LF_TEST_CLAP", "dev.bleeploop.test-gain", 1.5);
     }
 
+    /// The CLAP test plugin's 10 ms timer and its fd (a socket pair it writes on each tick) run on its
+    /// owner's loop with no editor open and no display: both counts rise while it is loaded, and the
+    /// unload ends them with no callback after `destroy` (the plugin aborts the process on one).
+    #[test]
+    #[ignore = "needs LF_TEST_CLAP: docs/VERIFY.md § Linux plugin hosting"]
+    fn a_clap_plugins_timer_and_fd_run_on_its_owner_loop_without_an_editor() {
+        let path = std::env::var("LF_TEST_CLAP").expect("LF_TEST_CLAP names the built test plugin (docs/VERIFY.md § Linux plugin hosting)");
+        let mut rig = Rig::new(RATE);
+        let handle = rig.load(PluginFormat::Clap, &path, "dev.bleeploop.test-gain", None);
+        let counts = || {
+            let params = handle.list_params().expect("params");
+            let count = |name: &str| params.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("a {name} parameter")).value;
+            (count("Ticks"), count("Fd wakes"))
+        };
+        let (ticks, wakes) = counts();
+        rig.run_for(Duration::from_millis(500));
+        let (ticks_after, wakes_after) = counts();
+        eprintln!("in 500 ms: {} timer ticks, {} fd wakes", ticks_after - ticks, wakes_after - wakes);
+        // A 10 ms timer at the owner's 20 ms turns: about 25 in 500 ms.
+        assert!(ticks_after - ticks >= 10.0, "the timer runs on the owner loop: {ticks} → {ticks_after}");
+        assert!(wakes_after - wakes >= 5.0, "the fd wakes the owner loop: {wakes} → {wakes_after}");
+
+        let unloading = std::thread::spawn(move || handle.unload());
+        while !unloading.is_finished() {
+            rig.render(1);
+        }
+        unloading.join().unwrap().expect("the unload");
+        // A late callback would abort the process here.
+        rig.run_for(Duration::from_millis(200));
+    }
+
     /// The test's own X client on the private display the editor opens on: finds the editor window by
     /// its `WM_CLASS`, reads its pixels, clicks it through XTEST and closes it as a window manager would.
     struct Screen {
@@ -935,6 +966,13 @@ mod tests {
             (at.dst_x, at.dst_y, g.width, g.height)
         }
 
+        /// The window's pixels (its children's drawing included).
+        fn pixels(&self, window: u32) -> Vec<u8> {
+            use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
+            let (_, _, w, h) = self.geometry(window);
+            self.conn.get_image(ImageFormat::Z_PIXMAP, window, 0, 0, w, h, !0).unwrap().reply().unwrap().data
+        }
+
         /// How many distinct colours the window shows (its children's drawing included): a window the
         /// plugin never drew into is one flat colour.
         fn colours(&self, window: u32) -> usize {
@@ -970,11 +1008,15 @@ mod tests {
             self.conn.flush().unwrap();
         }
 
-        /// `WM_DELETE_WINDOW`, sent to the window the way a window manager's close button sends it.
+        /// `WM_DELETE_WINDOW`, sent to the window the way a window manager's close button sends it: only
+        /// after the window advertised it in its `WM_PROTOCOLS`, as a window manager checks.
         fn wm_close(&self, window: u32) {
             use x11rb::connection::Connection as _;
-            use x11rb::protocol::xproto::{ClientMessageEvent, ConnectionExt as _, EventMask};
+            use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask};
             let atom = |name: &[u8]| self.conn.intern_atom(false, name).unwrap().reply().unwrap().atom;
+            let protocols = self.conn.get_property(false, window, atom(b"WM_PROTOCOLS"), AtomEnum::ATOM, 0, 32).unwrap().reply().unwrap();
+            let advertised: Vec<u32> = protocols.value32().map(Iterator::collect).unwrap_or_default();
+            assert!(advertised.contains(&atom(b"WM_DELETE_WINDOW")), "the window advertises WM_DELETE_WINDOW: {advertised:?}");
             let event = ClientMessageEvent::new(32, window, atom(b"WM_PROTOCOLS"), [atom(b"WM_DELETE_WINDOW"), 0, 0, 0, 0]);
             self.conn.send_event(false, window, EventMask::NO_EVENT, event).unwrap();
             self.conn.flush().unwrap();
@@ -994,12 +1036,15 @@ mod tests {
     /// moves; the drag that moved it, and the parameter's name. `up`: drag upward (else downward).
     fn drag_until_a_param_moves(rig: &mut Rig, screen: &Screen, window: u32, handle: &EngineSlotHandle, up: bool) -> Option<String> {
         let (_, _, w, h) = screen.geometry(window);
-        let (w, h) = (w as i16, h as i16);
+        let (w, h) = (i32::from(w), i32::from(h));
+        // In i32: a 900 px editor times a percentage overflows i16.
+        let point = |x: i32, y: i32| (i16::try_from(x).expect("on the screen"), i16::try_from(y).expect("on the screen"));
         let before = handle.list_params().expect("params");
         for row in [80, 88, 72] {
             for col in (52..=96).step_by(4) {
-                let from = (w * col / 100, h * row / 100);
-                let to = (from.0, if up { from.1 - h / 12 } else { from.1 + h / 12 });
+                let (x, y) = (w * col / 100, h * row / 100);
+                let from = point(x, y);
+                let to = point(x, if up { y - h / 12 } else { y + h / 12 });
                 screen.drag(window, from, to);
                 rig.run_for(Duration::from_millis(150));
                 let after = handle.list_params().expect("params");
@@ -1017,7 +1062,13 @@ mod tests {
     /// rebuild that re-activates the unit; closes through the app and through `WM_DELETE_WINDOW` (the
     /// latter as the app's `EditorClosed`), leaving no window behind.
     fn surge_editor_round_trip(format: PluginFormat, env: &str, id: &str) {
-        let path = std::env::var(env).unwrap_or_else(|_| panic!("{env} names Surge XT (docs/VERIFY.md § Linux plugin hosting)"));
+        // Skipped, not failed, without its display or plugin: `--ignored` on this module also runs the
+        // offline gain tests, which need neither.
+        let (Some(path), Some(_)) = (std::env::var_os(env), std::env::var_os("DISPLAY")) else {
+            eprintln!("SKIPPED: the Surge editor test needs {env} and DISPLAY (a private Xvfb): docs/VERIFY.md § Linux plugin hosting");
+            return;
+        };
+        let path = path.into_string().expect("a UTF-8 plugin path");
         let screen = Screen::connect();
         assert_eq!(screen.editor_window(), None, "no editor window before the test");
         let tag = format.as_str();
@@ -1056,8 +1107,15 @@ mod tests {
         assert!(replays, "the re-activated unit plays in the new engine");
         rig.send(Command::NoteOff(64));
         assert_eq!(screen.editor_window(), Some(window), "the editor stayed open across the rebuild");
-        assert!(rig.run_until(Duration::from_secs(5), |_| screen.colours(window) > 50), "and still draws");
+        // Shown by a new change, not by pixels from before the rebuild: a drag now must move a
+        // parameter (VST3: through performEdit again), and the plugin must redraw for it.
+        let drawn = screen.pixels(window);
+        events.lock().unwrap().clear();
         drag_until_a_param_moves(&mut rig, &screen, window, &handle, false).expect("and still takes input");
+        if format == PluginFormat::Vst3 {
+            assert!(events.lock().unwrap().iter().any(|e| matches!(e, EngineSlotEvent::ParamChanged { .. })), "performEdit after the rebuild");
+        }
+        assert!(rig.run_until(Duration::from_secs(5), |_| screen.pixels(window) != drawn), "and still draws: the window changed");
         screen.shot(&format!("{tag}-3-after-rebuild"));
 
         // Closed by the app (CloseEditor).

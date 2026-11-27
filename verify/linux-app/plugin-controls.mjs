@@ -76,16 +76,24 @@ async function editorOpened(format) {
   await sleep(5000);
 }
 
+/** An editor closed: tell the runner (which checks its window is gone) and hold still meanwhile, so no
+ * reopen can take the window's id first. */
+async function editorClosed(format, by) {
+  report('editor-closed', { slot: 'A', format, by });
+  await sleep(3000);
+}
+
 /** Surge XT's editors from slot A: opened by the pick, then by the slot's editor control. */
 async function surgeEditors() {
   await pick('A', 'clap', SURGE);
   await editorOpened('clap');
   editorButton().click();
   await until('slot A\'s editor to close by its control', () => editorButton() && !editorShown() && !editorButton().disabled, 10000);
-  report('editor-closed', { slot: 'A', format: 'clap' });
+  await editorClosed('clap', 'its control');
   editorButton().click();
   await editorOpened('clap');
   await off('A');
+  await editorClosed('clap', 'the unload');
   await pick('A', 'vst3', SURGE);
   await editorOpened('vst3');
 }
