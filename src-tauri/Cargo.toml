@@ -39,6 +39,10 @@ tauri-build = { version = "2.6.2", features = [] }
 # Raw in-process CLAP fixture exercising the production host callbacks through the real ABI.
 clap-sys = "=0.5.0"
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# The ignored editor tests (`linux_audio/plugins.rs`) click a plugin's editor on a private Xvfb.
+x11rb = { version = "0.14", default-features = false, features = ["xtest"] }
+
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -65,8 +69,9 @@ clack-host       = "=0.1.0"
 # feature does (verified against clack-extensions-0.1.0 source: audio_ports.rs gates host/ on it).
 # P10.0 adds "gui" (host-side CLAP gui ext for the floating editor). NOTE: `raw_window_handle_06` is
 # NOT needed for floating — `gui::Window::from_win32_hwnd` is safe + ungated (verified vs the 0.1.0
-# crate source); only embedded would want it. So: just "gui".
-clack-extensions = { version = "=0.1.0", features = ["params", "state", "audio-ports", "note-ports", "clack-host", "gui"] }
+# crate source); only embedded would want it. So: just "gui". "timer" + "posix-fd": the Linux run loop a
+# plugin's embedded X11 editor needs (`host/editor_window_linux.rs`).
+clack-extensions = { version = "=0.1.0", features = ["params", "state", "audio-ports", "note-ports", "clack-host", "gui", "timer", "posix-fd"] }
 # --- P10.1: native VST3 host ---
 # `vst3` 0.3.0 (coupler-rs): raw unsafe Steinberg FUnknown bindings. Only runtime
 # dep is `com-scrape-types` (NO windows/windows-core), so it cannot reconflict the pinned 0.61 graph
@@ -81,6 +86,11 @@ lf-rig           = { path = "crates/lf-rig" }
 # this crate too, so the lock holds one version.
 [target.'cfg(target_os = "linux")'.dependencies]
 libloading       = "0.8"
+# Plugin editor windows (`src/host/editor_window_linux.rs`): an X11 top-level per hosted editor, one
+# connection per owner thread, pure Rust (no libxcb link, no optional features).
+x11rb            = { version = "0.14", default-features = false }
+# The owner's `poll()` over its X connection and the plugin's run-loop fds (the same module).
+libc             = "0.2"
 
 # The Windows device side and plugin host use cpal, Win32 and the WebView2 COM bindings.
 [target.'cfg(windows)'.dependencies]

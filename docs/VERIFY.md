@@ -143,18 +143,39 @@ scan walks `~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap`, `CLAP_PATH`, then 
 the scan child: Archetype Petrucci X (2026-11-27) stopped there on a Wine dialog asking to download and
 install "License Support components", so the scan's 20 s bound lists it as failed until its licensing
 runs in that Wine prefix. Run such a scan on a private X display (`DISPLAY` of an Xvfb): Wine shows its
-dialogs on whatever display the scan child has. Plugin editor windows are not hosted on Linux yet.
+dialogs on whatever display the scan child has.
+
+Plugin editors on Linux (`src-tauri/src/host/editor_window_linux.rs`): two more ignored tests open
+Surge XT's CLAP and VST3 editors from slot 0 on a private X display. Each must show a window that the
+plugin draws into, take an XTEST drag that moves a parameter the host reads back (VST3: and reaches the
+host as `performEdit`), stay open, drawing and taking input across a rebuild at 44.1 kHz whose
+re-activated unit plays a note, close by `CloseEditor` and by a `WM_DELETE_WINDOW` sent as a window
+manager sends it (arriving as `EditorClosed`), and leave no window behind after either or after an
+unload with it open. No window manager runs there; `LF_TEST_SHOTS` keeps a screenshot of each step.
+Surge reads its factory data from `$HOME/.local/share/surge-xt`, so the run gets a temporary HOME:
+
+```sh
+Xvfb :93 -screen 0 1600x1000x24 -nolisten tcp &   # the extracted binary, see below
+mkdir -p /tmp/lf-home/.local/share && ln -s "$SURGE/share/surge-xt" /tmp/lf-home/.local/share/
+cd src-tauri && env -u WAYLAND_DISPLAY DISPLAY=:93 HOME=/tmp/lf-home LF_TEST_SHOTS=/tmp/lf-shots \
+  LF_TEST_SURGE_CLAP="$SURGE/lib/clap/Surge XT.clap" LF_TEST_SURGE_VST3="$SURGE/lib/vst3/Surge XT.vst3" \
+  cargo test --lib linux_audio::plugins::tests::surge -- --ignored --nocapture --test-threads=1
+```
 
 In the app: `verify/linux-app/plugin-probe.mjs` runs a debug app (built with `build.devUrl`
 `http://127.0.0.1:14937`, as § Linux desktop audio builds it) on a private PipeWire graph of two null
 sinks, its own X display and a temporary HOME, with the test plugins as its only plugin folders, and
 picks the CLAP one in slot A and the VST3 one in slot B through the slots' own pickers. Each must load,
 show its name on the slot and list its Gain; then Off in slot A must unload its plugin from the running
-engine. Xvfb is not installed on the Omarchy PC: without root,
+engine. Given an unpacked Surge XT release as a fourth argument, the page then picks Surge XT (CLAP) in
+slot A, whose editor opens with the pick, closes and reopens it with the slot's editor control, and
+picks Surge XT (VST3) there; at each open the runner must find the editor window on the display
+(`xprop`: the plugin's name, the host's `WM_CLASS`) and screenshots the whole display beside
+`probe.png`. Xvfb is not installed on the Omarchy PC: without root,
 extract the `xorg-server-xvfb` package into a folder and pass its binary as `XVFB`.
 
 ```sh
-XVFB=/path/to/Xvfb node verify/linux-app/plugin-probe.mjs src-tauri/target/debug/app /tmp/lf-plugins /tmp/probe.png
+XVFB=/path/to/Xvfb node verify/linux-app/plugin-probe.mjs src-tauri/target/debug/app /tmp/lf-plugins /tmp/probe.png [SURGE_DIR]
 ```
 
 ## Linux AppImage

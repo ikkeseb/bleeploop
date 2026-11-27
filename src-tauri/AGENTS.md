@@ -176,8 +176,7 @@ A dev start that names a build path from an old checkout location (a moved or re
 
 All in `src-tauri/src/host/`. The known-fragile area: read this whole section before any plugin or
 plugin-GUI work.
-- **The Linux app builds this host's CLAP and VST3 half** (no VST2, no chains, no editor window yet:
-  `src/host/editor_window_linux.rs` stands in for the Win32 one and refuses an editor). Its slots and their
+- **The Linux app builds this host's CLAP and VST3 half** (no VST2, no chains). Its slots and their
   engine handshake are `src/linux_audio/plugins.rs`; the shared owners reach it as `crate::engine_io::SlotHost`
   through a seam in `lib.rs`. A `#[cfg(windows)]` edit here must keep the Linux build green (`cargo check`
   on Linux; the Windows half cross-checks from Linux too: `docs/VERIFY.md` § Linux plugin hosting).
@@ -216,6 +215,17 @@ plugin-GUI work.
   Petrucci). Each pump call is bounded (64 messages or 2 ms, `editor_window::pump_thread_messages`), so
   a plugin whose messages repost themselves cannot keep an owner from its requests, saves or unload.
   GUI calls go via the owner channel, NOT `run_on_main_thread`.
+- **Linux editors embed into an X11 top-level of the owner's own** (`src/host/editor_window_linux.rs`,
+  x11rb; XWayland under a Wayland desktop): CLAP `GuiApiType::X11` embedded only (no floating try),
+  VST3 `kPlatformTypeX11EmbedWindowID`. A Linux plugin GUI draws only if the host runs its fds and
+  timers on its GUI thread: the VST3 frame answers `IRunLoop`, the CLAP host declares `timer-support`
+  and `posix-fd-support`, both register in the owner thread's registry, and the format's `idle` calls
+  them back after the turn's pump; while a hosted editor is open the owner's wait is one `poll()` over
+  its X connection, those fds and the nearest timer (≤ 20 ms). A window manager's close is
+  `WM_DELETE_WINDOW`, taken as the Win32 close box. Teardown keeps the Windows order: VST3 `removed()` →
+  the frame's run-loop handlers released → window destroyed; CLAP `gui.destroy` → window destroyed, the
+  plugin's own timers and fds forgotten after its instance is destroyed. Proof: `docs/VERIFY.md` § Linux
+  plugin hosting.
 - **Editor size is the plugin's, measured not computed:** `editor_window::set_client_size` sizes the
   CLIENT area by measuring the real frame (DPI-correct), at creation and on every plugin-initiated
   resize: VST3 `IPlugFrame::resizeView` (then `onSize` with the granted size), hosted-CLAP

@@ -22,13 +22,13 @@
 //! `vst2.rs` (the VST2 binary interface, module loader and host callback) and `pe.rs` (which `.dll` is a VST2 plugin, read
 //! from its headers).
 
-// Linux builds the Windows host's CLAP and VST3 half without VST2, chains or the editor window: the
-// items only those reach are dead there, and the Windows build keeps linting them.
+// Linux builds the Windows host's CLAP and VST3 half without VST2 or chains: the items only those reach
+// are dead there, and the Windows build keeps linting them.
 #![cfg_attr(target_os = "linux", allow(dead_code, unused_imports))]
 
 // The CLAP and VST3 hosts run on Windows and Linux (clack and the `vst3` crate are portable); VST2,
-// its PE pre-filter and the Win32 editor window are Windows-only. Linux keeps the editor window's
-// names in a stand-in (`editor_window_linux.rs`).
+// its PE pre-filter and the Win32 editor window are Windows-only. Linux hosts editors in X11 windows
+// under the same names (`editor_window_linux.rs`).
 #[cfg(any(windows, target_os = "linux"))]
 mod clap;
 mod commands;

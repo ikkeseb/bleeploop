@@ -627,6 +627,11 @@ impl OwnedPlugin for Vst3 {
     }
 
     fn idle(&mut self) -> bool {
+        // Linux: the view's run-loop fds and timers the pump found due (its X11 GUI draws through them).
+        #[cfg(target_os = "linux")]
+        if let Vst3Editor::Open { _frame, .. } = &self.editor {
+            _frame.dispatch_run_loop();
+        }
         let closed = matches!(&self.editor, Vst3Editor::Open { win, .. } if win.close_requested());
         if closed {
             vst3_editor_close(&mut self.editor);
