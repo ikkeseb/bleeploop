@@ -45,6 +45,22 @@ async fn blocking<T: Send + 'static>(
     .await
 }
 
+/// Linux: a plugin command's slot work, on a blocking thread (`linux_audio/plugins.rs`).
+#[cfg(target_os = "linux")]
+async fn linux_blocking<T: Send + 'static>(
+    app: tauri::AppHandle,
+    op: &'static str,
+    work: impl FnOnce(&crate::linux_audio::plugins::Slots, &PluginHostState) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let slots = crate::linux_audio::plugin_slots(&app)?;
+        work(&slots, &app.state::<PluginHostState>())
+    })
+    .await
+    .map_err(|e| format!("{op} task: {e}"))?
+}
+
 /// `blocking`'s dispatch: `work` on the runtime's blocking pool. A task that failed (it panicked) is
 /// the host's fault, never the plugin's: the frontend keeps rig recall for "{op} task"
 /// (`src/ui/state/instrument.ts`).
@@ -77,7 +93,7 @@ pub async fn host_init(state: tauri::State<'_, PluginHostState>) -> Result<u32, 
 /// debug builds.
 #[tauri::command]
 pub async fn plugin_scan(app: tauri::AppHandle, force: bool) -> Result<Vec<PluginDescriptor>, String> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
         use tauri::Manager;
         let data_dir = match app.path().app_local_data_dir() {
@@ -96,7 +112,7 @@ pub async fn plugin_scan(app: tauri::AppHandle, force: bool) -> Result<Vec<Plugi
         .await
         .map_err(|e| format!("plugin scan task: {e}"))?
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (app, force);
         Ok(Vec::new())
@@ -108,7 +124,7 @@ pub async fn plugin_scan(app: tauri::AppHandle, force: bool) -> Result<Vec<Plugi
 /// paths, which it matches against the scan's own walk: nothing outside the walked folders is read.
 #[tauri::command]
 pub async fn plugin_scan_paths(app: tauri::AppHandle, paths: Vec<String>) -> Result<Vec<PluginDescriptor>, String> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
         use tauri::Manager;
         let data_dir = app.path().app_local_data_dir().ok();
@@ -120,7 +136,7 @@ pub async fn plugin_scan_paths(app: tauri::AppHandle, paths: Vec<String>) -> Res
         .await
         .map_err(|e| format!("plugin scan task: {e}"))?
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (app, paths);
         Ok(Vec::new())
@@ -128,10 +144,10 @@ pub async fn plugin_scan_paths(app: tauri::AppHandle, paths: Vec<String>) -> Res
 }
 
 /// The player's plugin folder list, beside the scan cache in the app's local data dir.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 const FOLDERS_FILE: &str = "plugin-folders.json";
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn folders_file(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     use tauri::Manager;
     let dir = app
@@ -142,7 +158,7 @@ fn folders_file(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
 }
 
 /// The folder list as Audio Settings shows it, with what the last scan did not list.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn folders_view(state: &PluginHostState, user: &[String]) -> PluginFolders {
     let not_listed = state.scan_not_listed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     super::folders::view(user, not_listed)
@@ -158,12 +174,12 @@ pub async fn plugin_folders(
     app: tauri::AppHandle,
     state: tauri::State<'_, PluginHostState>,
 ) -> Result<PluginFolders, String> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
         let user = super::folders::load(&folders_file(&app)?)?;
         Ok(folders_view(&state, &user))
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (app, state);
         Err("plugin_folders is Windows-only".to_string())
@@ -225,13 +241,13 @@ pub async fn plugin_folder_remove(
     app: tauri::AppHandle,
     state: tauri::State<'_, PluginHostState>,
 ) -> Result<PluginFolders, String> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
         let user = super::folders::remove(&state.folders_write, &folders_file(&app)?, &path)?;
         log::info!("[scan] plugin folder removed: {path}");
         Ok(folders_view(&state, &user))
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (path, app, state);
         Err("plugin_folder_remove is Windows-only".to_string())
@@ -258,7 +274,16 @@ pub async fn plugin_load(
         })
         .await
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        use tauri::Manager;
+        let app = window.app_handle().clone();
+        linux_blocking(app, "plugin_load", move |slots, state| {
+            slots.load(state, &window, slot, path, id, frontend_epoch, tone_token)
+        })
+        .await
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (&window, &path, &id, frontend_epoch, tone_token);
         Err(format!("plugin_load is Windows-only (slot={slot})"))
@@ -273,7 +298,11 @@ pub async fn plugin_unload(slot: u8, frontend_epoch: u32, app: tauri::AppHandle)
     {
         blocking(app, "plugin_unload", move |engine, state| engine.plugin_unload(state, slot, frontend_epoch)).await
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux_blocking(app, "plugin_unload", move |slots, state| slots.unload(slot, Some((state, frontend_epoch)), true)).await
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (frontend_epoch, app);
         Ok(())
@@ -284,12 +313,18 @@ pub async fn plugin_unload(slot: u8, frontend_epoch: u32, app: tauri::AppHandle)
 /// while the native slots stayed loaded) and unload them before the next load hits "slot N already
 /// has a plugin loaded". `[]` in the web build.
 #[tauri::command]
-pub async fn plugin_list_loaded() -> Result<Vec<PluginInfo>, String> {
+pub async fn plugin_list_loaded(app: tauri::AppHandle) -> Result<Vec<PluginInfo>, String> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = &app;
     #[cfg(windows)]
     {
         engine()?.plugin_list_loaded()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        Ok(crate::linux_audio::plugin_slots(&app)?.list_loaded())
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Ok(Vec::new())
     }
@@ -313,7 +348,11 @@ pub async fn plugin_set_param(
         })
         .await
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux_blocking(app, "plugin_set_param", move |slots, state| slots.set_param(state, frontend_epoch, slot, param_id, value)).await
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (param_id, value, frontend_epoch, app);
         Ok(())
@@ -330,7 +369,12 @@ pub async fn plugin_tone_take(slot: u8, app: tauri::AppHandle) -> Result<tauri::
         let bytes = blocking(app, "plugin_tone_take", move |engine, _| engine.plugin_tone_take(slot)).await?;
         Ok(tauri::ipc::Response::new(bytes))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        let bytes = linux_blocking(app, "plugin_tone_take", move |slots, _| slots.tone_take(slot)).await?;
+        Ok(tauri::ipc::Response::new(bytes))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = app;
         Err(format!("plugin_tone_take is Windows-only (slot={slot})"))
@@ -365,7 +409,18 @@ pub async fn plugin_tone_import(request: tauri::ipc::Request<'_>, app: tauri::Ap
         let bytes = bytes.clone();
         blocking(app, "plugin_tone_import", move |engine, _| engine.plugin_tone_import(slot, &bytes, &expected)).await
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        let expected: super::tone::ToneIdentity = request
+            .headers()
+            .get("plugin")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| serde_json::from_str(v).ok())
+            .ok_or("plugin_tone_import needs the plugin the session names (a plugin header)")?;
+        let bytes = bytes.clone();
+        linux_blocking(app, "plugin_tone_import", move |slots, _| slots.tone_import(slot, &bytes, &expected)).await
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (bytes, app);
         Err(format!("plugin_tone_import is Windows-only (slot={slot})"))
@@ -374,13 +429,23 @@ pub async fn plugin_tone_import(request: tauri::ipc::Request<'_>, app: tauri::Ap
 /// The reload a session import answered `token` for did not happen (the slot moved while the import
 /// ran): drop the tone parked for it (`EngineApp::plugin_tone_forget`).
 #[tauri::command]
-pub async fn plugin_tone_forget(slot: u8, token: u32) -> Result<(), String> {
+pub async fn plugin_tone_forget(slot: u8, token: u32, app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = &app;
     validate_slot(slot)?;
     #[cfg(windows)]
     {
         engine()?.plugin_tone_forget(slot, token)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux_blocking(app, "plugin_tone_forget", move |slots, _| {
+            slots.tone_forget(slot, token);
+            Ok(())
+        })
+        .await
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = token;
         Err(format!("plugin_tone_forget is Windows-only (slot={slot})"))
@@ -395,7 +460,11 @@ pub async fn plugin_list_params(slot: u8, app: tauri::AppHandle) -> Result<Vec<P
     {
         blocking(app, "plugin_list_params", move |engine, _| engine.plugin_list_params(slot)).await
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux_blocking(app, "plugin_list_params", move |slots, _| slots.list_params(slot)).await
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = app;
         Ok(Vec::new())
@@ -411,7 +480,11 @@ pub async fn plugin_open_editor(slot: u8, frontend_epoch: u32, app: tauri::AppHa
     {
         blocking(app, "plugin_open_editor", move |engine, state| engine.plugin_open_editor(state, frontend_epoch, slot)).await
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux_blocking(app, "plugin_open_editor", move |slots, state| slots.open_editor(state, frontend_epoch, slot)).await
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (frontend_epoch, app);
         Err(format!("plugin_open_editor is Windows-only (slot={slot})"))
@@ -426,7 +499,11 @@ pub async fn plugin_close_editor(slot: u8, frontend_epoch: u32, app: tauri::AppH
     {
         blocking(app, "plugin_close_editor", move |engine, state| engine.plugin_close_editor(state, frontend_epoch, slot)).await
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux_blocking(app, "plugin_close_editor", move |slots, state| slots.close_editor(state, frontend_epoch, slot)).await
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (frontend_epoch, app);
         Ok(())
@@ -438,8 +515,11 @@ pub async fn plugin_close_editor(slot: u8, frontend_epoch: u32, app: tauri::AppH
 #[tauri::command]
 pub async fn plugin_list_input_devices() -> Result<Vec<AudioInputDevice>, String> {
     #[cfg(windows)]
+    let devs = crate::audio_input::list_input_devices()?;
+    #[cfg(target_os = "linux")]
+    let devs = tauri::async_runtime::spawn_blocking(crate::linux_audio::list_inputs).await.map_err(|e| e.to_string())??;
+    #[cfg(any(windows, target_os = "linux"))]
     {
-        let devs = crate::audio_input::list_input_devices()?;
         Ok(devs
             .into_iter()
             .map(|d| AudioInputDevice {
@@ -449,7 +529,7 @@ pub async fn plugin_list_input_devices() -> Result<Vec<AudioInputDevice>, String
             })
             .collect())
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Ok(Vec::new())
     }
@@ -459,8 +539,11 @@ pub async fn plugin_list_input_devices() -> Result<Vec<AudioInputDevice>, String
 #[tauri::command]
 pub async fn plugin_list_output_devices() -> Result<Vec<AudioOutputDevice>, String> {
     #[cfg(windows)]
+    let devs = crate::audio_output::list_output_devices()?;
+    #[cfg(target_os = "linux")]
+    let devs = tauri::async_runtime::spawn_blocking(crate::linux_audio::list_outputs).await.map_err(|e| e.to_string())??;
+    #[cfg(any(windows, target_os = "linux"))]
     {
-        let devs = crate::audio_output::list_output_devices()?;
         Ok(devs
             .into_iter()
             .map(|d| AudioOutputDevice {
@@ -470,7 +553,7 @@ pub async fn plugin_list_output_devices() -> Result<Vec<AudioOutputDevice>, Stri
             })
             .collect())
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Ok(Vec::new())
     }
@@ -618,7 +701,7 @@ pub fn plugin_asio_device_info() -> Option<AsioDriverInfo> {
 /// error → stderr + non-zero exit; a hard crash in the bundle's foreign code dies here (the child),
 /// never the host. Windows-only — `lib.rs::run()` dispatches `--scan-one` to this before Tauri ever
 /// starts.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub fn scan_one_main(path: &str) -> i32 {
     // Wait until the parent has this process in its kill-on-close Job (no gate when run by hand).
     if let Err(e) = super::scan::await_scan_gate() {

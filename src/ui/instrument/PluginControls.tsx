@@ -1,6 +1,6 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount, type Accessor, type JSX } from 'solid-js';
 import { createStore } from 'solid-js/store';
-import { platform, type PluginDescriptor, type PluginParamDesc } from '../../platform';
+import { jackHost, platform, type PluginDescriptor, type PluginParamDesc } from '../../platform';
 import { editorAffinityBlocker, slotPendingCounts } from '../state/instrument';
 import { notifyError } from '../../notify';
 import { slotLetter } from '../state/slot-tones';
@@ -8,6 +8,9 @@ import { liveShown, startLive } from './live';
 import { Icon } from './icons';
 import { PlateMenu } from './PlateMenu';
 import './plugin-controls.css';
+
+/** The Linux app hosts no plugin editor window yet (`src-tauri/src/host/editor_window_linux.rs`): no editor control. */
+const editors = !jackHost;
 
 /**
  * The plugin's controls in the slot row:
@@ -151,7 +154,7 @@ export function PluginPlate(props: {
     onCleanup(() => (gone = true));
     void (async () => {
       if (props.descriptor.isEffect === true && liveShown(props.slot)) await startLive(props.slot);
-      if (!gone) await toggleEditor(true);
+      if (!gone && editors) await toggleEditor(true);
     })();
   });
 
@@ -166,20 +169,22 @@ export function PluginPlate(props: {
             {fmt()}
           </span>
           {/* EDITOR: the opens-a-window glyph (open = lit warm white; one accessible name, the state in aria-pressed) */}
-          <button
-            type="button"
-            class="plate__ed"
-            aria-pressed={editorOpen()}
-            aria-label={`Editor for slot ${letter}`}
-            title={editorOpen() ? "Close the plugin's window" : "Open the plugin's window"}
-            disabled={sourcePending() || editorBusy()}
-            onClick={(e) => {
-              e.stopPropagation();
-              void toggleEditor();
-            }}
-          >
-            <Icon name="win" size={16} />
-          </button>
+          <Show when={editors}>
+            <button
+              type="button"
+              class="plate__ed"
+              aria-pressed={editorOpen()}
+              aria-label={`Editor for slot ${letter}`}
+              title={editorOpen() ? "Close the plugin's window" : "Open the plugin's window"}
+              disabled={sourcePending() || editorBusy()}
+              onClick={(e) => {
+                e.stopPropagation();
+                void toggleEditor();
+              }}
+            >
+              <Icon name="win" size={16} />
+            </button>
+          </Show>
         </span>
         <PlateMenu
           id={`slot-${props.slot}-menu`}
@@ -188,7 +193,7 @@ export function PluginPlate(props: {
           returnFocus={props.returnFocus}
           groups={[
             [
-              { label: 'Editor', icon: 'win', checked: editorOpen(), disabled: sourcePending() || editorBusy(), onSelect: () => void toggleEditor() },
+              ...(editors ? [{ label: 'Editor', icon: 'win' as const, checked: editorOpen(), disabled: sourcePending() || editorBusy(), onSelect: () => void toggleEditor() }] : []),
               { label: 'Parameters', icon: 'params', checked: props.paramsOpen, controls: props.drawerId, disabled: sourcePending(), onSelect: props.onToggleParams },
             ],
             [

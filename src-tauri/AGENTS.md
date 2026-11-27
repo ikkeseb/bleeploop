@@ -176,6 +176,12 @@ A dev start that names a build path from an old checkout location (a moved or re
 
 All in `src-tauri/src/host/`. The known-fragile area: read this whole section before any plugin or
 plugin-GUI work.
+- **The Linux app builds this host's CLAP and VST3 half** (no VST2, no chains, no editor window yet:
+  `src/host/editor_window_linux.rs` stands in for the Win32 one and refuses an editor). Its slots and their
+  engine handshake are `src/linux_audio/plugins.rs`; the shared owners reach it as `crate::engine_io::SlotHost`
+  through a seam in `lib.rs`. A `#[cfg(windows)]` edit here must keep the Linux build green (`cargo check`
+  on Linux; the Windows half cross-checks from Linux too: `docs/VERIFY.md` § Linux plugin hosting).
+  Linux loads a VST3 binary from `Contents/x86_64-linux/` with `dlopen` and `ModuleEntry`/`ModuleExit`.
 - **Every WebView document gets a `frontendEpoch` from `host_init`** (one atomic step, never 0), and
   every request that changes a slot (load, unload, a parameter, the editor) carries it: one from a
   replaced document is refused, checked as it takes the slot. A load reserves its slot before foreign

@@ -107,7 +107,7 @@ export function InstrumentSlot(props: { slot: 0 | 1; returnFocus?: (el: HTMLElem
           : slotOff()[slotIdx]
             ? 'off'
             : slotIds()[slotIdx];
-  const ask = slotIdx === 0 ? 'Pick your amp-sim' : 'Add a second sound';
+  const ask = slotIdx === 1 ? 'Add a second sound' : 'Pick your amp-sim';
   // What the plate's name reads: the plugin's or synth's name, else the picker's own words.
   const sourceName = () =>
     pending() ? 'Updating…' : plugin() ? plugin()!.name : unset() ? ask : (synth()?.name ?? 'Off');

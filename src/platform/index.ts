@@ -410,6 +410,7 @@ export function mintUnitId(): UnitId {
   return word[0];
 }
 
+export { jackHost } from './host.tauri';
 export * from './host';
 export * from './engine-wire';
 export * from './midi-wire';

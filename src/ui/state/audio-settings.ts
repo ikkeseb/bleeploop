@@ -1,5 +1,5 @@
 import { guitarFirstInstall } from './instrument-slots';
-import type { InputPick } from '../../platform';
+import { jackHost, type InputPick } from '../../platform';
 
 /**
  * Persisted audio device selections — the engine's input and output device, each slot's input channel,
@@ -39,8 +39,8 @@ export interface AudioDeviceSettings {
   slotInputChannels: [InputPick, InputPick];
   /** Native output device id; '' = default output. */
   outputDeviceId: string;
-  /** RT block size in frames; one of BUFFER_FRAMES_OPTIONS (live buffer control). */
-  bufferFrames: BufferFrames;
+  /** RT block size in frames; null on JACK follows the server without changing its quantum. */
+  bufferFrames: BufferFrames | null;
   /** The engine's rate pick, one of SAMPLE_RATE_OPTIONS; null = the device's own. */
   sampleRate: SampleRate | null;
   /** Prefer the ASIO low-latency tier (vs WASAPI-shared). Default true; ignored
@@ -73,7 +73,7 @@ const DEFAULTS: AudioDeviceSettings = {
   inputChannel: '',
   slotInputChannels: [null, null],
   outputDeviceId: '',
-  bufferFrames: DEFAULT_BUFFER_FRAMES,
+  bufferFrames: jackHost ? null : DEFAULT_BUFFER_FRAMES,
   sampleRate: null,
   asioEnabled: true,
   asioDriver: '',
@@ -105,7 +105,7 @@ export function readAudioDeviceSettings(): AudioDeviceSettings {
       outputDeviceId: typeof p.outputDeviceId === 'string' ? p.outputDeviceId : '',
       bufferFrames: (BUFFER_FRAMES_OPTIONS as readonly number[]).includes(p.bufferFrames as number)
         ? (p.bufferFrames as BufferFrames)
-        : DEFAULT_BUFFER_FRAMES,
+        : DEFAULTS.bufferFrames,
       sampleRate: (SAMPLE_RATE_OPTIONS as readonly number[]).includes(p.sampleRate as number) ? (p.sampleRate as SampleRate) : null,
       asioEnabled: typeof p.asioEnabled === 'boolean' ? p.asioEnabled : true,
       asioDriver: typeof p.asioDriver === 'string' ? p.asioDriver : '',

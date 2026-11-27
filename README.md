@@ -144,7 +144,17 @@ What it is not:
 - Not a DAW: no timeline or arrangement. The mix is per-track volume, pan, mute and FX.
 - Not an amp sim: bring your own plugin.
 - Not a full MIDI host: notes, CC and pitch bend come in; no MIDI out, MIDI clock or SysEx.
-- Not cross-platform: Windows only. The browser build is a silent test rig, not a web app.
+- Published installers target Windows. The experimental Linux desktop build runs the built-in
+  instruments and looper on JACK, including PipeWire's JACK implementation. External plugins and
+  hardware MIDI controllers still need the Windows build. The browser build is a silent test rig.
+
+### Play on Linux from source
+
+With the Tauri Linux build dependencies, the JACK development library and a running JACK or
+PipeWire graph, run `pnpm install` and `pnpm exec tauri dev`. Open Audio Settings, select the
+capture and playback ports for your interface and start with the server's buffer size. Choose a
+built-in instrument, play the on-screen or computer keyboard, and press REC on an empty lane.
+The [Linux verification flow](docs/VERIFY.md#linux-desktop-audio) checks the actual desktop app.
 
 ## How it is built
 

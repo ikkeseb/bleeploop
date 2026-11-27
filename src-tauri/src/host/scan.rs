@@ -14,17 +14,22 @@
 //! host (32-bit, a shell) is reported as unsupported, with why, beside the descriptors.
 
 use super::engine_slot::PluginFormat;
+#[cfg(windows)]
 use super::pe;
 use super::state::{FailedPlugin, NotListed, PluginDescriptor, UnsupportedPlugin};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
+#[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+#[cfg(windows)]
 use windows::core::PCWSTR;
+#[cfg(windows)]
 use windows::Win32::Foundation::HANDLE;
+#[cfg(windows)]
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -39,11 +44,49 @@ const SCAN_CHILD_TIMEOUT: Duration = Duration::from_secs(20);
 const SCAN_STDOUT_CAP: usize = 1024 * 1024;
 const SCAN_STDERR_CAP: usize = 64 * 1024;
 
+/// Linux: the scan child leads its own process group (`run_gated_child` spawns it so), and the guard
+/// kills that group when dropped, which reaches whatever the plugin started under it, as the Windows
+/// Job does. A descendant that leaves the group on purpose (`setsid`) is beyond it.
+#[cfg(target_os = "linux")]
+struct KillOnCloseJob(std::sync::atomic::AtomicI32);
+
+#[cfg(target_os = "linux")]
+impl KillOnCloseJob {
+    fn new() -> Result<Self, String> {
+        Ok(Self(std::sync::atomic::AtomicI32::new(0)))
+    }
+
+    fn assign(&self, child: &Child) -> Result<(), String> {
+        let pid = i32::try_from(child.id()).map_err(|_| "scan child pid out of range".to_string())?;
+        self.0.store(pid, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for KillOnCloseJob {
+    fn drop(&mut self) {
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        const SIGKILL: i32 = 9;
+        let pid = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        if pid > 0 {
+            // SAFETY: a signal to the process group the scan child leads; an empty group answers ESRCH.
+            unsafe {
+                kill(-pid, SIGKILL);
+            }
+        }
+    }
+}
+
 /// Owns a Windows Job Object that terminates every assigned process when dropped. Closing this
 /// before joining the pipe readers guarantees a scan child cannot leave a descendant holding either
 /// pipe open after the direct child exits or times out.
+#[cfg(windows)]
 struct KillOnCloseJob(OwnedHandle);
 
+#[cfg(windows)]
 impl KillOnCloseJob {
     fn new() -> Result<Self, String> {
         // SAFETY: null security attributes/name create a private job owned by this process.
@@ -83,20 +126,62 @@ impl KillOnCloseJob {
 
 /// Drain a pipe to EOF so the child never blocks on a full pipe, while retaining at most `cap`
 /// bytes in the parent process.
-fn drain_capped(mut reader: impl Read, cap: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(cap.min(8192));
+#[cfg(all(test, windows))]
+fn drain_capped(reader: impl Read, cap: usize) -> Vec<u8> {
+    let out = std::sync::Mutex::new(Vec::with_capacity(cap.min(8192)));
+    drain_into(reader, cap, &out);
+    out.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `drain_capped` into a buffer the caller can read before EOF (`collect_reader`).
+fn drain_into(mut reader: impl Read, cap: usize, out: &std::sync::Mutex<Vec<u8>>) {
     let mut chunk = [0u8; 8192];
     loop {
         match reader.read(&mut chunk) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
+                let mut out = out.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let keep = cap.saturating_sub(out.len()).min(n);
                 out.extend_from_slice(&chunk[..keep]);
             }
         }
     }
-    out
 }
+
+/// A pipe reader thread and the bytes it has read so far.
+type Reader = (std::thread::JoinHandle<()>, std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+fn spawn_reader(pipe: impl Read + Send + 'static, cap: usize) -> Reader {
+    let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(cap.min(8192))));
+    let buf = out.clone();
+    (std::thread::spawn(move || drain_into(pipe, cap, &buf)), out)
+}
+
+/// What a reader read, once it reached EOF. Windows: the Job's close ends every holder of the pipe,
+/// so EOF comes. Linux: a process that left the scan child's group (Wine's server, under yabridge)
+/// can hold the pipe open, so the reader gets `READER_GRACE` and is then left to EOF on its own,
+/// with what it read by then.
+fn collect_reader(reader: Option<Reader>) -> Vec<u8> {
+    let Some((handle, out)) = reader else { return Vec::new() };
+    #[cfg(not(windows))]
+    {
+        let deadline = Instant::now() + READER_GRACE;
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !handle.is_finished() {
+            log::warn!("[scan] a process outside the scan child still holds its output; read what came");
+            return out.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        }
+    }
+    let _ = handle.join();
+    let bytes = std::mem::take(&mut *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    bytes
+}
+
+/// How long a Linux scan waits for its pipes' EOF after the child's group is gone.
+#[cfg(not(windows))]
+const READER_GRACE: Duration = Duration::from_secs(2);
 
 /// Why one bundle produced no descriptors. `Bundle` is the plugin's own doing (crash, non-zero
 /// exit, timeout, unparsable output) and is cached under its fingerprint so it is not retried every
@@ -405,7 +490,8 @@ fn scan_paths_with(
     (found, merged, stats)
 }
 
-#[cfg(test)]
+// The scan's tests drive PE fixtures, junctions and the Job Object: Windows-only.
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
     use std::io::Cursor;
@@ -1286,6 +1372,31 @@ pub(crate) struct Root {
 /// `VST3_PATH`. Then VST2, which has no one standard folder (`vst2_roots`). The player's own folders
 /// come after these (`scan_all`). A new format is one more variant of `PluginFormat`, its roots here
 /// and a candidate rule in `find_bundles`.
+#[cfg(target_os = "linux")]
+pub(crate) fn builtin_roots() -> Vec<Root> {
+    // The CLAP and VST3 specs' Linux folders: the user's own first, then the system's, then every
+    // `:`-separated entry of `CLAP_PATH` / `VST3_PATH`. VST2 is not hosted on Linux.
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut roots = Vec::new();
+    for (format, dir, user_dir, path_var) in
+        [(PluginFormat::Clap, "clap", ".clap", "CLAP_PATH"), (PluginFormat::Vst3, "vst3", ".vst3", "VST3_PATH")]
+    {
+        let mut push = |path: PathBuf| roots.push(Root { path, only: Some(format) });
+        if let Some(home) = &home {
+            push(home.join(user_dir));
+        }
+        push(Path::new("/usr/lib").join(dir));
+        push(Path::new("/usr/local/lib").join(dir));
+        if let Ok(paths) = std::env::var(path_var) {
+            for p in paths.split(':').filter(|s| !s.is_empty()) {
+                push(PathBuf::from(p));
+            }
+        }
+    }
+    roots
+}
+
+#[cfg(windows)]
 pub(crate) fn builtin_roots() -> Vec<Root> {
     let mut roots = Vec::new();
     for (format, dir, path_var) in [(PluginFormat::Clap, "CLAP", "CLAP_PATH"), (PluginFormat::Vst3, "VST3", "VST3_PATH")] {
@@ -1311,6 +1422,7 @@ pub(crate) fn builtin_roots() -> Vec<Root> {
 /// `%CommonProgramFiles%\Steinberg\VST2`, the folder the registry names (`registry`), then every
 /// `;`-separated entry of `VST_PATH`. The registry and `VST_PATH` often name one of the others: a
 /// folder is listed once.
+#[cfg(windows)]
 fn vst2_roots(registry: Option<String>) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     let mut push = |path: PathBuf| {
@@ -1339,6 +1451,7 @@ fn vst2_roots(registry: Option<String>) -> Vec<PathBuf> {
 
 /// `HKLM\SOFTWARE\VST` → `VSTPluginsPath`: the VST2 folder installers register and read. `None`
 /// when the value is not there (or is not a string).
+#[cfg(windows)]
 fn registry_vst2_path() -> Option<String> {
     use windows::core::w;
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
@@ -1425,6 +1538,9 @@ fn find_bundles(roots: &[Root]) -> Walked {
                 found.bundles.push(path.to_path_buf());
                 continue;
             }
+            #[cfg(not(windows))]
+            continue;
+            #[cfg(windows)]
             match pe::classify(path) {
                 pe::Class::Candidate => found.bundles.push(path.to_path_buf()),
                 pe::Class::Inconclusive(why) => {
@@ -1442,6 +1558,17 @@ fn find_bundles(roots: &[Root]) -> Walked {
     found
 }
 
+/// A VST3 bundle's binary folder and the binary's extension on this platform (the SDK's
+/// `Contents/<arch>-<os>/<Name>.<ext>`).
+#[cfg(windows)]
+const VST3_ARCH_DIR: &str = "x86_64-win";
+#[cfg(windows)]
+const VST3_BINARY_EXTENSION: &str = "vst3";
+#[cfg(target_os = "linux")]
+const VST3_ARCH_DIR: &str = "x86_64-linux";
+#[cfg(target_os = "linux")]
+const VST3_BINARY_EXTENSION: &str = "so";
+
 /// Resolve a top-level `.vst3` path to its loadable DLL. Single-file form → the file itself;
 /// folder-bundle form → the `.vst3` DLL under `Contents/x86_64-win/`. Pub: the VST3 loader
 /// (`clap::vst3_host`) reuses it to resolve the binary at load time.
@@ -1450,11 +1577,11 @@ pub fn resolve_vst3_binary(path: &Path) -> Option<PathBuf> {
         return Some(path.to_path_buf());
     }
     if path.is_dir() {
-        let arch_dir = path.join("Contents").join("x86_64-win");
+        let arch_dir = path.join("Contents").join(VST3_ARCH_DIR);
         if arch_dir.is_dir() {
             for entry in std::fs::read_dir(&arch_dir).ok()?.filter_map(|e| e.ok()) {
                 let p = entry.path();
-                if PluginFormat::of_path(&p) == Some(PluginFormat::Vst3) && p.is_file() {
+                if p.extension().is_some_and(|e| e.eq_ignore_ascii_case(VST3_BINARY_EXTENSION)) && p.is_file() {
                     return Some(p);
                 }
             }
@@ -1470,18 +1597,24 @@ pub fn scan_one(path: &str) -> Result<ScanOutcome, String> {
     match PluginFormat::of_path(Path::new(path)) {
         Some(PluginFormat::Clap) => scan_one_clap(path).map(ScanOutcome::plugins),
         Some(PluginFormat::Vst3) => scan_one_vst3(path),
+        #[cfg(windows)]
         Some(PluginFormat::Vst2) => scan_one_vst2(path),
+        #[cfg(not(windows))]
+        Some(PluginFormat::Vst2) => Err(format!("{path}: VST2 plugins are hosted on Windows only")),
         None => Err(format!("{path}: not a .clap, .vst3 or .dll plugin")),
     }
 }
 
 /// What the scan tells a VST2 plugin its host runs at: no device is open, and none is needed.
+#[cfg(windows)]
 const VST2_SCAN_RATE: f64 = 48_000.0;
+#[cfg(windows)]
 const VST2_SCAN_BLOCK: i32 = 512;
 
 /// CHILD side: load ONE VST2 `.dll`, open its effect and describe it. No `FreeLibrary` and the
 /// host context is never freed: the child process exits right after printing, and a plugin that
 /// started a thread of its own may still call the host.
+#[cfg(windows)]
 fn scan_one_vst2(path: &str) -> Result<ScanOutcome, String> {
     use super::vst2::{HostContext, Vst2Module};
     let module = Vst2Module::load(Path::new(path))?;
@@ -1502,6 +1635,7 @@ fn scan_one_vst2(path: &str) -> Result<ScanOutcome, String> {
 /// # Safety
 /// As `vst2::open_effect`: `entry` is a VST2 entry whose module stays loaded, and the caller keeps
 /// `ctx` alive for as long as the plugin may call the host.
+#[cfg(windows)]
 unsafe fn describe_vst2(
     entry: super::vst2_abi::EntryFn,
     ctx: &std::sync::Arc<super::vst2::HostContext>,
@@ -1584,6 +1718,49 @@ fn cstr_owned(s: Option<&std::ffi::CStr>) -> String {
 /// Loads the module with the `windows` loader (the vst3 crate provides no loader), wraps the
 /// `GetPluginFactory()` return in a `ComPtr`, and describes the factory (`describe_vst3`). No
 /// `FreeLibrary`: the child process exits right after printing.
+#[cfg(target_os = "linux")]
+fn scan_one_vst3(path: &str) -> Result<ScanOutcome, String> {
+    use libloading::os::unix::{Library, RTLD_LAZY, RTLD_LOCAL};
+
+    let binary = resolve_vst3_binary(Path::new(path)).ok_or_else(|| format!("no loadable VST3 binary inside {path}"))?;
+    // SAFETY: loading the module runs the plugin's foreign entry-init code (`ModuleEntry`); the
+    // factory calls FFI into its vtbl. Accepted because this runs in the throwaway `--scan-one` child
+    // process. The library is leaked: the child exits right after printing.
+    unsafe {
+        let lib = Library::open(Some(&binary), RTLD_LAZY | RTLD_LOCAL).map_err(|e| format!("dlopen: {e}"))?;
+        if let Ok(entry) = lib.get::<unsafe extern "C" fn(*mut std::ffi::c_void) -> bool>(b"ModuleEntry\0") {
+            let entry = *entry;
+            let raw = lib.into_raw();
+            if !entry(raw) {
+                return Err("ModuleEntry returned false".to_string());
+            }
+            let lib = std::mem::ManuallyDrop::new(Library::from_raw(raw));
+            return describe_linux_factory(&lib, path);
+        }
+        let lib = std::mem::ManuallyDrop::new(lib);
+        describe_linux_factory(&lib, path)
+    }
+}
+
+/// The factory of a loaded Linux VST3 module, described (`describe_vst3`).
+///
+/// # Safety
+/// `lib` is a loaded VST3 module whose `ModuleEntry`, if any, succeeded.
+#[cfg(target_os = "linux")]
+unsafe fn describe_linux_factory(lib: &libloading::os::unix::Library, path: &str) -> Result<ScanOutcome, String> {
+    use vst3::ComPtr;
+    use vst3::Steinberg::IPluginFactory;
+    // SAFETY: the caller's contract.
+    unsafe {
+        let get = lib
+            .get::<unsafe extern "C" fn() -> *mut IPluginFactory>(b"GetPluginFactory\0")
+            .map_err(|_| "GetPluginFactory not exported".to_string())?;
+        let factory = ComPtr::from_raw(get()).ok_or_else(|| "GetPluginFactory returned null".to_string())?;
+        Ok(describe_vst3(&factory, path))
+    }
+}
+
+#[cfg(windows)]
 fn scan_one_vst3(path: &str) -> Result<ScanOutcome, String> {
     use std::os::windows::ffi::OsStrExt;
     use vst3::ComPtr;
@@ -1639,7 +1816,7 @@ unsafe fn describe_vst3(factory: &vst3::ComPtr<vst3::Steinberg::IPluginFactory>,
     unsafe {
         let mut factory_info: PFactoryInfo = std::mem::zeroed();
         let uncacheable = factory.getFactoryInfo(&mut factory_info) == kResultOk
-            && factory_info.flags & kClassesDiscardable != 0;
+            && (factory_info.flags as u32) & (kClassesDiscardable as u32) != 0;
         let count = factory.countClasses();
         // IPluginFactory2 (when the factory implements it — most modern plugins) carries
         // `subCategories`, which classifies instrument vs Fx. Fall back to PClassInfo (no
@@ -1764,6 +1941,8 @@ fn run_gated_child(
     before_assign: impl FnOnce(),
 ) -> Result<Vec<u8>, ScanError> {
     let job = KillOnCloseJob::new().map_err(ScanError::Host)?;
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd
         .env(SCAN_GATE_ENV, "1")
         .stdin(Stdio::piped())
@@ -1790,14 +1969,8 @@ fn run_gated_child(
     // AFTER exit, a chatty plugin's write() blocks on a full pipe, the child never exits, and we
     // stall to the 20s timeout and wrongly mark a good plugin failed. Readers can't deadlock —
     // they read continuously — so the child always makes progress. (Bug-hunt 2026-06-21.)
-    let stdout_reader = child
-        .stdout
-        .take()
-        .map(|so| std::thread::spawn(move || drain_capped(so, SCAN_STDOUT_CAP)));
-    let stderr_reader = child
-        .stderr
-        .take()
-        .map(|se| std::thread::spawn(move || drain_capped(se, SCAN_STDERR_CAP)));
+    let stdout_reader = child.stdout.take().map(|so| spawn_reader(so, SCAN_STDOUT_CAP));
+    let stderr_reader = child.stderr.take().map(|se| spawn_reader(se, SCAN_STDERR_CAP));
     let deadline = Instant::now() + timeout;
     // The loop only decides the exit OUTCOME; the reader threads above are joined once after it,
     // so the child handles are never moved inside the loop body.
@@ -1823,8 +1996,8 @@ fn run_gated_child(
         let _ = child.kill();
         let _ = child.wait();
     }
-    let out = stdout_reader.and_then(|h| h.join().ok()).unwrap_or_default();
-    let err_bytes = stderr_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+    let out = collect_reader(stdout_reader);
+    let err_bytes = collect_reader(stderr_reader);
     let err = String::from_utf8_lossy(&err_bytes);
     match outcome {
         Ok(status) if status.success() => Ok(out),

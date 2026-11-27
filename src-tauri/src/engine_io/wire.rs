@@ -774,7 +774,7 @@ mod present {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(windows, test))]
 mod tests {
     use super::super::{DeviceRequest, InputPick, OpenError};
     use super::*;

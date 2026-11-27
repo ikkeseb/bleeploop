@@ -84,6 +84,7 @@
 //!   resubscribe and a blur.
 
 mod actions;
+mod ui_route;
 pub mod bindings;
 mod learn;
 mod liveness;

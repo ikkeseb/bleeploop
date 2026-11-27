@@ -1,6 +1,6 @@
 import { asioStatus, slotInputChannels } from '../state/audio-devices';
 import { slotIds, slotOff, slotPlugins } from '../state/instrument';
-import { platform, type ReadPick } from '../../platform';
+import { jackHost, platform, type ReadPick } from '../../platform';
 import { notifyError, notifyInfo } from '../../notify';
 import { engineDevice } from '../state/engine-store';
 
@@ -58,7 +58,7 @@ function audioLines(): string[] {
   if (!d) return ['Audio: native engine', 'Device: none open', slotChannelsLine(undefined)];
   return [
     'Audio: native engine',
-    `Backend: ${d.backend === 'Asio' ? 'ASIO' : 'WASAPI'}`,
+    `Backend: ${d.backend.toUpperCase()}`,
     `Device: ${d.inputOpen ? d.inputName : 'no input'} → ${d.outputName}`,
     `Sample rate: ${d.sampleRate} Hz`,
     `Buffer: ${d.block} frames`,
@@ -71,7 +71,7 @@ function diagnosticsText(logDir: string | null): string {
   const asio = asioStatus();
   const lines = [
     `${BUILD_LABEL} (${import.meta.env.DEV ? 'dev' : 'release'} build)`,
-    `App: ${platform.kind === 'tauri' ? 'Windows app' : 'browser build'}`,
+    `App: ${jackHost ? 'Linux app' : platform.kind === 'tauri' ? 'Windows app' : 'browser build'}`,
     ...audioLines(),
     ...(asio.status === 'not-compiled' ? [] : [`ASIO status: ${asio.status}${asio.detail ? ` (${asio.detail})` : ''}`]),
     slotLine(0),

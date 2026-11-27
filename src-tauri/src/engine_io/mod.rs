@@ -155,6 +155,8 @@ pub(crate) mod chain;
 pub mod chain_cmds;
 mod cpal_driver;
 mod driver;
+mod ends;
+use ends::{Ends, FeedDrain};
 #[cfg(test)]
 mod fake_driver;
 mod feed;
@@ -198,8 +200,8 @@ use std::time::{Duration, Instant};
 use lf_engine::grid::Frame;
 use lf_engine::scope::ScopeBin;
 use lf_engine::tuner::TunerFrame;
-use lf_engine::{Command, Engine, Event, LaneState, Overview, SessionPort, SlotPort, TimedCommand, UnitMeter, SLOT_COUNT, TRACK_COUNT};
-use rtrb::{Consumer, Producer};
+use lf_engine::{Command, Engine, Event, LaneState, Overview, SlotPort, TimedCommand, UnitMeter, SLOT_COUNT, TRACK_COUNT};
+use rtrb::Consumer;
 use serde::{Deserialize, Serialize};
 
 use crate::audio_output::AudioBackend;
@@ -617,48 +619,6 @@ pub(crate) struct Rt {
     pub(crate) tone: Option<Box<tone::ToneRig>>,
 }
 
-/// The engine's non-RT ends, replaced with the engine (a sample-rate change builds a new one).
-pub(crate) struct Ends {
-    pub(crate) commands: Producer<TimedCommand>,
-    /// The commands `commands` took, in all: the engine's overview counts the ones it has taken
-    /// ([`EngineHost::silence_slot`] waits on a block after its own).
-    pub(crate) pushed: u64,
-    pub(crate) events: Consumer<Event>,
-    pub(crate) overview: Arc<Overview>,
-    /// The session port (`session.rs`), out while a snapshot or load uses it.
-    pub(crate) session: Option<SessionPort>,
-    /// The scope taps' columns (`lf_engine::scope`), drained by the feed every tick, and the frames one
-    /// column of this engine covers.
-    pub(crate) scope: Consumer<ScopeBin>,
-    pub(crate) scope_bin: u32,
-    /// The tuner's tap (`lf_engine::tuner`): both slots' raw input while the tuner is on, drained by the
-    /// feed every tick with the scope; and this engine's sample rate, which the feed's pitch analysis
-    /// is built for.
-    pub(crate) tuner: Consumer<TunerFrame>,
-    pub(crate) rate: u32,
-    /// The unit meter ring (`EngineHandle::unit_meters`): each seated unit's meter, folded by the engine
-    /// at most every 4 ms; drained by the feed every tick with the scope, off the audio thread, and
-    /// folded per unit until a frame carries it (`feed.rs`).
-    pub(crate) unit_meters: Consumer<UnitMeter>,
-}
-
-/// What one feed drain read under `settings` and `ends`, besides the events and taps it moved out.
-pub(crate) struct FeedDrain {
-    /// The engine generation the drain read (`Core::engine_gen`).
-    pub(crate) gen: u64,
-    /// That engine's overview; `None` while no engine exists.
-    pub(crate) overview: Option<Arc<Overview>>,
-    /// The frames one scope column of that engine covers (0: no engine).
-    pub(crate) scope_bin: u32,
-    /// That engine's sample rate (0: no engine).
-    pub(crate) rate: u32,
-    /// The chain model's snapshot read in the same `settings` + `ends` acquisition as the events, of the
-    /// generation `gen` names (mid-swap, the old one's last: `Model::snapshot_for`).
-    pub(crate) chains: chain::ChainRev,
-    /// True if [`Core::stash`] overflowed while the feed was stale (the feed sends a reset).
-    pub(crate) stash_lost: bool,
-}
-
 /// Who takes `settings` or `ends` (`lock_at`): the input path (`EngineHost::send_all`), the feed
 /// (`drain_feed`), or another reader.
 #[derive(Clone, Copy, Debug)]
@@ -1066,6 +1026,10 @@ pub struct EngineHost {
 }
 
 impl EngineHost {
+    fn feed_anchor(&self) -> Option<(Frame, f64, u32)> {
+        self.core.clock.anchor()
+    }
+
     /// Spawn the device owner thread. No device opens and no engine exists until [`EngineHost::open`].
     /// The owner runs until [`EngineHost::shutdown`]. Err when the thread does not start (engine mode
     /// then runs the launch without an engine).

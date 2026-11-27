@@ -663,9 +663,15 @@ pub(crate) fn load(
         PluginFormat::Vst3 => spawn(format, slot, editor_parent, sink, tone, move |ctx| {
             super::vst3_host::engine::run(ctx, path, &id)
         }),
+        #[cfg(windows)]
         PluginFormat::Vst2 => spawn(format, slot, editor_parent, sink, tone, move |ctx| {
             super::vst2_engine::run(ctx, path, &id)
         }),
+        #[cfg(not(windows))]
+        PluginFormat::Vst2 => {
+            let _ = (path, id, slot, editor_parent, sink, tone);
+            Err("VST2 plugins are hosted on Windows only".to_string())
+        }
     }
 }
 
@@ -1023,7 +1029,7 @@ pub(crate) fn one_engine_test_at_a_time() -> std::sync::MutexGuard<'static, ()> 
 }
 
 /// Test-only: the allocations `f` makes on this thread under the RT alloc guard.
-#[cfg(all(test, debug_assertions))]
+#[cfg(all(test, windows, debug_assertions))]
 pub(super) fn rt_allocations(mut f: impl FnMut()) -> u64 {
     use super::super::rt_alloc::{allocations, guard};
     let before = allocations();
@@ -1034,7 +1040,7 @@ pub(super) fn rt_allocations(mut f: impl FnMut()) -> u64 {
     allocations() - before
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use std::any::Any;
     use std::sync::mpsc::channel;

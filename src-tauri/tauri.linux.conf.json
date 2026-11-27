@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["appimage"],
+    "licenseFile": "../licenses/GPL-3.0.txt",
+    "resources": {
+      "../licenses/": "licenses/",
+      "../LICENSE": "licenses/BleepLoop-source-MIT.txt",
+      "../THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md"
+    },
+    "linux": {
+      "appimage": { "bundleMediaFramework": false }
+    }
+  }
+}

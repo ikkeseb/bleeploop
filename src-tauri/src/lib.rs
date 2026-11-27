@@ -11,6 +11,18 @@ mod audio_output;
 // (`engine_io::mode`) runs it; a DEV probe drives it too.
 #[cfg(windows)]
 mod engine_io;
+#[cfg(target_os = "linux")]
+mod linux_audio;
+// The shared plugin owners (`host/engine_slot.rs`, `clap_engine.rs`, `vst3_engine.rs`) reach a slot's
+// engine handshake as `crate::engine_io::SlotHost` and its terms as `engine_io::unit_host::Terms`: on
+// Linux those are the JACK host's (`linux_audio/plugins.rs`).
+#[cfg(target_os = "linux")]
+mod engine_io {
+    pub(crate) use crate::linux_audio::plugins::SlotHost;
+    pub(crate) mod unit_host {
+        pub(crate) use crate::linux_audio::plugins::Terms;
+    }
+}
 // DEV: the loopback chirp analysis the spike and the engine probe share.
 #[cfg(all(windows, debug_assertions))]
 mod chirp_lag;
@@ -37,6 +49,10 @@ fn panic_hook(prev: PanicHook, log: fn(&str)) -> PanicHook {
     Box::new(move |info| {
         #[cfg(windows)]
         if engine_io::in_rt_callback() {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if linux_audio::in_rt_callback() {
             return;
         }
         // The payload is a &str for `panic!("literal")` and a String for formatted panics: try both.
@@ -134,25 +150,38 @@ fn frontend_log(message: String) {
 fn app_log_dir(app: tauri::AppHandle) -> Result<String, String> {
     use tauri::Manager;
     let dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
+    #[cfg(windows)]
     let under_local = app.path().local_data_dir().ok().and_then(|local| dir.strip_prefix(local).ok());
+    #[cfg(windows)]
     let shown = match under_local {
         Some(rest) => std::path::Path::new("%LOCALAPPDATA%").join(rest),
         None => dir.clone(),
     };
+    #[cfg(not(windows))]
+    let shown = dir;
     Ok(shown.display().to_string())
 }
 
-/// Help's Open log folder: Explorer on the release log's folder, so a tester can attach the log to a
-/// report. No shell plugin: the one fixed folder, no path from the WebView. Explorer is not waited on
-/// (it can stay up as the shell), and it exits non-zero even on success.
+/// Help opens the app's own log folder. Explorer may stay alive as the shell and reports non-zero
+/// even on success; on Linux xdg-open's exit status reports whether the file manager launched.
 #[tauri::command]
-fn app_open_log_dir(app: tauri::AppHandle) -> Result<(), String> {
+async fn app_open_log_dir(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::Manager;
     let dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
-    std::process::Command::new("explorer").arg(&dir).spawn().map(drop).map_err(|e| {
+    let opener = if cfg!(target_os = "linux") { "xdg-open" } else { "explorer" };
+    let child = std::process::Command::new(opener).arg(&dir).spawn().map_err(|e| {
         log::error!("opening the log folder {} failed: {e}", dir.display());
         format!("could not open the log folder: {e}")
-    })
+    })?;
+    #[cfg(target_os = "linux")]
+    {
+        let mut child = child;
+        let exit = tauri::async_runtime::spawn_blocking(move || child.wait()).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+        if !exit.success() { return Err(format!("could not open the log folder ({exit})")); }
+    }
+    #[cfg(not(target_os = "linux"))]
+    drop(child);
+    Ok(())
 }
 
 /// Windows: DENY the WebView2 Web MIDI permission to the app's own pages, without a prompt. One MIDI
@@ -212,12 +241,13 @@ pub fn run() {
     // P9.1: out-of-process plugin scan child mode. `app.exe --scan-one <path>` loads ONE bundle
     // (CLAP, VST3 or VST2), prints what it holds as JSON, and exits BEFORE Tauri starts — so a
     // crashy plugin bundle takes down only this throwaway child, never the host. The parent's
-    // plugin_scan command spawns it per bundle.
-    #[cfg(windows)]
+    // plugin_scan command spawns it per bundle. The Linux app hosts CLAP and VST3 too and scans the
+    // same way; the probes and ASIO are Windows-only.
+    #[cfg(any(windows, target_os = "linux"))]
     {
         let args: Vec<String> = std::env::args().collect();
         // Native-engine Stage 1 premise spike (`docs/ARCHITECTURE.md` § Measured premise).
-        #[cfg(debug_assertions)]
+        #[cfg(all(windows, debug_assertions))]
         if let Some(pos) = args.iter().position(|a| a == "--probe-engine-spike") {
             match host::engine_spike_run(&args[pos + 1..]) {
                 Ok(()) => std::process::exit(0),
@@ -228,7 +258,7 @@ pub fn run() {
             }
         }
         // The native engine's rig probe (`engine_io/probe.rs`).
-        #[cfg(debug_assertions)]
+        #[cfg(all(windows, debug_assertions))]
         if let Some(pos) = args.iter().position(|a| a == "--probe-engine") {
             match engine_io::probe::run(&args[pos + 1..]) {
                 Ok(()) => std::process::exit(0),
@@ -238,7 +268,7 @@ pub fn run() {
                 }
             }
         }
-        #[cfg(debug_assertions)]
+        #[cfg(all(windows, debug_assertions))]
         if let Some(pos) = args.iter().position(|a| a == "--probe-share" || a == "--probe-share-child") {
             match share_probe::run(args[pos] == "--probe-share-child", &args[pos + 1..]) {
                 Ok(()) => std::process::exit(0),
@@ -258,6 +288,13 @@ pub fn run() {
         // before any window exists. The frontend requests the probe (`plugin_asio_probe`) after the UI
         // is up and only if the saved preference is on — `asio_startup.rs` owns the rules.
         // `--disable-asio` is the escape hatch: no probe this launch, whatever the preference says.
+        // The Linux app's headless start check (an AppImage's smoke test): the version, before Tauri.
+        #[cfg(target_os = "linux")]
+        if args.iter().any(|a| a == "--version") {
+            println!("BleepLoop {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
+        #[cfg(windows)]
         if args.iter().any(|a| a == "--disable-asio") {
             audio_output::set_asio_disabled_by_flag();
         }
@@ -272,7 +309,10 @@ pub fn run() {
     if let single_instance::Claim::Exit = single_instance::first_launch(&context.config().identifier) {
         std::process::exit(0);
     }
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "linux")]
+    let builder = builder.append_invoke_initialization_script("Object.defineProperty(window, '__LF_JACK__', {value:true});");
+    builder
         // Shared host state: the WebView document epoch (`host_init`).
         .manage(host::PluginHostState::default())
         .manage(update::UpdateState::default())
@@ -317,6 +357,8 @@ pub fn run() {
                 // The native engine: its device owner, feed and native MIDI, once per launch.
                 engine_io::mode::EngineApp::setup(app.handle());
             }
+            #[cfg(target_os = "linux")]
+            linux_audio::setup(app)?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -362,6 +404,28 @@ pub fn run() {
             // Device pickers (native devices; the engine opens them).
             host::plugin_list_input_devices,
             host::plugin_list_output_devices,
+            #[cfg(target_os = "linux")]
+            linux_audio::ipc::engine_open,
+            #[cfg(target_os = "linux")]
+            linux_audio::ipc::engine_close,
+            #[cfg(target_os = "linux")]
+            linux_audio::ipc::engine_status,
+            #[cfg(target_os = "linux")]
+            linux_audio::ipc::engine_feed,
+            #[cfg(target_os = "linux")]
+            linux_audio::ipc::engine_feed_ack,
+            #[cfg(target_os = "linux")]
+            linux_audio::ipc::engine_set_slot_input_channel,
+            #[cfg(target_os = "linux")]
+            linux_audio::ipc::engine_set_share,
+            #[cfg(target_os = "linux")]
+            linux_audio::ipc::midi_subscribe,
+            #[cfg(target_os = "linux")]
+            linux_audio::ipc::input_send,
+            #[cfg(target_os = "linux")]
+            linux_audio::ipc::engine_snapshot,
+            #[cfg(target_os = "linux")]
+            linux_audio::ipc::engine_load_session,
             // The ASIO tier: availability, cached driver, startup probe and driver switch.
             host::plugin_asio_device_info,
             host::plugin_asio_status,
@@ -463,7 +527,11 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 engine_io::mode::EngineApp::shutdown();
             }
-            #[cfg(not(windows))]
+            #[cfg(target_os = "linux")]
+            if let tauri::RunEvent::Exit = event {
+                linux_audio::shutdown(app);
+            }
+            #[cfg(not(any(windows, target_os = "linux")))]
             let _ = event;
         });
 }

@@ -1,0 +1,16 @@
+# A test plugin for the Linux plugin host (`src-tauri/src/linux_audio/plugins.rs` tests): stereo in,
+# stereo out, out = in × GAIN. Its own workspace, so the app's gates never build it; the host's
+# real-plugin tests build it on demand (`docs/VERIFY.md § Linux plugin hosting`).
+[package]
+name = "lf-test-gain-clap"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clap-sys = "=0.5.0"

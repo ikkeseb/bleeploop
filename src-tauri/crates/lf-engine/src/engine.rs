@@ -236,6 +236,20 @@ struct Pending {
     owed: bool,
 }
 
+/// A host with a graph-wide xrun can distinguish external capture from internally generated frames.
+/// Carry this across every engine slice in one device period. A pending report is consumed at the
+/// first input-fed slice; `routed` remembers whether any slot could pass device input in this period.
+#[derive(Default)]
+pub struct CaptureActivity {
+    graph_xrun: bool,
+    raw_gap: bool,
+    pub routed: bool,
+}
+
+impl CaptureActivity {
+    pub fn new(graph_xrun: bool) -> Self { Self { graph_xrun, raw_gap: graph_xrun, routed: false } }
+}
+
 pub struct Engine {
     config: EngineConfig,
     clock: Clock,
@@ -721,6 +735,15 @@ impl Engine {
     /// Render one block: `inputs[s]` is slot `s`'s input pair (its capture channels; a mono pick is the
     /// same channel on both sides), `left`/`right` the output (every one the same length).
     pub fn process_inputs(&mut self, ctx: &ProcessContext, inputs: [[&[f32]; 2]; SLOT_COUNT], left: &mut [f32], right: &mut [f32]) {
+        self.render_inputs(ctx, inputs, left, right, None);
+    }
+
+    /// Render while tracking the device-input gates under the exact commands applied in this block.
+    pub fn process_inputs_observed(&mut self, ctx: &ProcessContext, inputs: [[&[f32]; 2]; SLOT_COUNT], left: &mut [f32], right: &mut [f32], activity: &mut CaptureActivity) {
+        self.render_inputs(ctx, inputs, left, right, Some(activity));
+    }
+
+    fn render_inputs(&mut self, ctx: &ProcessContext, inputs: [[&[f32]; 2]; SLOT_COUNT], left: &mut [f32], right: &mut [f32], mut activity: Option<&mut CaptureActivity>) {
         let n = left.len();
         assert!(n <= self.config.max_block && right.len() == n && inputs.iter().flatten().all(|x| x.len() == n), "block larger than max_block");
         let start = ctx.frame;
@@ -768,6 +791,8 @@ impl Engine {
             self.looper.cut_listening_until(until);
         }
         let mut live_latency = self.rack.record_latency();
+        // The tuner always reads raw device input, independently of the gates to the recorder.
+        if activity.as_deref_mut().is_some_and(|a| std::mem::take(&mut a.raw_gap)) { self.tuner.gap(); }
         if ctx.xrun || ctx.damaged {
             self.xruns += 1;
             // The tuner's input breaks here: its next frame starts a new epoch (`crate::tuner`).
@@ -877,6 +902,17 @@ impl Engine {
                 let until = first_slot_pending(&self.pending, f, &self.rack).map_or(end, |at| at.min(end));
                 let (a, b) = (self.slots_done, ((until - start) as usize).max(k_next));
                 let ([wl, wr], [al, ar], [bl, br]) = (&mut self.wet, &mut self.aligned, &mut self.slot_bus);
+                // The rack is about to render the span to its next slot command. Its actual gate
+                // includes a ramp-out and an owner-shut slot, even if GO LIVE changed on this frame.
+                if let Some(activity) = activity.as_deref_mut() {
+                    if (0..SLOT_COUNT).any(|slot| self.rack.gate_open(slot)) {
+                        activity.routed = true;
+                        if std::mem::take(&mut activity.graph_xrun) {
+                            self.xruns += 1;
+                            self.looper.input_gap(f, f, f, live_latency);
+                        }
+                    }
+                }
                 self.rack.render(
                     inputs.map(|[l, r]| [&l[a..b], &r[a..b]]),
                     [&mut wl[a..b], &mut wr[a..b]],

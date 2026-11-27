@@ -10,6 +10,7 @@ use super::engine_slot::{
     own, restore_tone, serve, slot_terms, Editor, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported, Restore, Setup,
     FAULT_PARAM, FAULT_PROCESS, FAULT_START,
 };
+#[cfg(windows)]
 use super::unit_owner::{serve_unit, UnitCtx};
 use crate::host::tone::MAX_STATE_BYTES;
 use super::*;
@@ -424,6 +425,7 @@ pub(super) fn run(
 }
 
 /// The chain-unit CLAP owner (`unit_owner::serve_unit`): clack's main thread for one chain unit.
+#[cfg(windows)]
 pub(super) fn run_unit(
     ctx: UnitCtx,
     id: &str,

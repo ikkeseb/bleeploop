@@ -85,6 +85,91 @@ router (the fake records it in `__lf.native.inputSent`; native MIDI's events are
   session cannot hijack mid-probe.
 - `file://` is BLOCKED in Playwright (mockups need `python3 -m http.server 8765`).
 
+## Linux desktop audio
+
+Run this on Linux with the normal desktop build dependencies, JACK development files, a running
+JACK graph, Xvfb (including `xvfb-run` and `xauth`), and PulseAudio-compatible `pactl` and
+`parec`. The capture needs a Pulse sink monitor of the **same output** selected in JACK. Find
+the JACK groups with `pw-jack jack_lsp` and the monitor with `pactl list short sources`.
+Keep that output free of other audio during the test. The group is the part of a port name before
+the colon. Run these commands from the repository root:
+
+```sh
+pnpm install --frozen-lockfile
+(cd src-tauri && TAURI_CONFIG='{"build":{"devUrl":"http://127.0.0.1:14937"}}' cargo build --locked -p app)
+pw-jack node verify/linux-app/run.mjs src-tauri/target/debug/app \
+  'EVO4 0' 'EVO 4 Speakers / Headphones' \
+  'alsa_output.usb-Audient_EVO4-00.HiFi__Headphones__sink.monitor'
+```
+
+The runner starts its own development server and two software-rendered app windows on private X
+displays. The first selects the endpoints in Audio Settings. It pins the observed buffer size when the menu
+offers it, and otherwise verifies the server-default preference.
+The second reopens the same private profile and verifies the controls and native device status.
+The test records two notes from the built-in organ using the lane and keyboard controls. The
+stereo sink monitor must contain the live phrase and two matching replays at the engine's bar
+length followed by silence. The runner prints its temporary directory with the unamplified WAV,
+app logs and measurements. An increase in JACK xruns or skipped device frames fails the timing
+check even when both replays match. On the EVO 4, a 48 kHz / 512-frame run with the raw capture
+group and the speaker sink shown above repeated a 96,000-frame bar twice. Both channels differed
+from the live phrase by 0.32% relative RMS, with zero additional xruns or skipped frames. The
+named guitar route showed gaps in other normal-priority runs. This short check establishes
+neither sustained stability nor guitar latency, which needs a physical loopback.
+
+To test buffer negotiation without changing the desktop graph, run
+`python3 verify/linux-app/private-graph.py`. It starts a separate PipeWire server, switches quantum and endpoints, checks that a
+refused route leaves the old one running, then closes and reopens the selected route.
+The standalone probe below isolates the device and engine if the desktop flow fails.
+
+## Linux plugin hosting
+
+The Linux app hosts CLAP and VST3 plugins in its slots with the Windows host's owners
+(`src-tauri/src/linux_audio/plugins.rs`). Two tests load real test plugins through that host and
+render offline on the idle engine, no device and nothing audible: a steady input through slot 0 with
+GO LIVE must come out ×0.5 at the plugin's default, ×1.5 after a host-set parameter, ×1.5 again once a
+rebuild at 44.1 kHz has evicted and re-activated it, dry after the unload, and ×1.5 at the next load
+from the tone the unload saved. A pass-through build of the plugin fails the first check.
+
+```sh
+sh verify/linux-plugins/build.sh /tmp/lf-plugins
+cd src-tauri && LF_TEST_CLAP=/tmp/lf-plugins/clap/LfTestGain.clap \
+  LF_TEST_VST3=/tmp/lf-plugins/vst3/LfTestGain.vst3 \
+  cargo test --lib linux_audio::plugins -- --ignored --nocapture
+```
+
+The scan child runs on its own too: `target/debug/app --scan-one <path>` prints the descriptor. The
+scan walks `~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap`, `CLAP_PATH`, then the same for VST3
+(`~/.vst3`, `VST3_PATH`); `:` separates a path list. A Windows VST3 bridged by yabridge loads Wine in
+the scan child: Archetype Petrucci X (2026-11-27) stopped there on a Wine dialog asking to download and
+install "License Support components", so the scan's 20 s bound lists it as failed until its licensing
+runs in that Wine prefix. Run such a scan on a private X display (`DISPLAY` of an Xvfb): Wine shows its
+dialogs on whatever display the scan child has. Plugin editor windows are not hosted on Linux yet.
+
+In the app: `verify/linux-app/plugin-probe.mjs` runs a debug app (built with `build.devUrl`
+`http://127.0.0.1:14937`, as § Linux desktop audio builds it) on a private PipeWire graph of two null
+sinks, its own X display and a temporary HOME, with the test plugins as its only plugin folders, and
+picks the CLAP one in slot A and the VST3 one in slot B through the slots' own pickers. Each must load,
+show its name on the slot and list its Gain; then Off in slot A must unload its plugin from the running
+engine. Xvfb is not installed on the Omarchy PC: without root,
+extract the `xorg-server-xvfb` package into a folder and pass its binary as `XVFB`.
+
+```sh
+XVFB=/path/to/Xvfb node verify/linux-app/plugin-probe.mjs src-tauri/target/debug/app /tmp/lf-plugins /tmp/probe.png
+```
+
+## Linux AppImage
+
+`sh scripts/linux-appimage.sh` builds `src-tauri/target/release/bundle/appimage/BleepLoop-x86_64.AppImage`
+(the script's header says what it changes in Tauri's bundle step and why). It runs on the Omarchy PC
+without FUSE 2 and prints its version (`--version`, before Tauri starts). The smoke test starts it as a
+click would, on the same private graph, display and HOME, and passes when it logs its start and its
+plugin scan and still runs; then it closes it:
+
+```sh
+XVFB=/path/to/Xvfb sh verify/linux-app/appimage-smoke.sh \
+  src-tauri/target/release/bundle/appimage/BleepLoop-x86_64.AppImage /tmp/appimage.png /tmp/lf-plugins
+```
+
 ## Linux JACK device probe
 
 The standalone crate in `verify/linux-audio/` runs `lf-engine` in one duplex JACK callback.

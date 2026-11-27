@@ -7,6 +7,7 @@ import {
   decodeOpenError,
   decodeSnapshot,
   encodeSessionBytes,
+  jackHost,
   platform,
   sendEngine,
   sendEngineAlone,
@@ -39,6 +40,9 @@ import { averageInterval, clampBars, framesPerBar, maxWholeBars } from './quanti
 import { readStoredNumber, writeStoredNumber } from './persist';
 import { readAudioDeviceSettings, writeAudioDeviceSettings, type AudioDeviceSettings } from './audio-settings';
 import {
+  commitDeviceEdit,
+  jackEndpointFallback,
+  type DeviceEdit,
   saveSlotInputChannels,
   setAsioEnabled,
   setBufferSize,
@@ -758,10 +762,11 @@ function applyDeviceEvent(ev: DeviceEvent): void {
       forgetShare();
       break;
     case 'EngineFaulted':
-      console.error('[engine] the engine faulted and was replaced');
+      if (jackHost) setOpenFailure('The JACK engine stopped.');
+      console.error(jackHost ? '[engine] the JACK engine faulted' : '[engine] the engine faulted and was replaced');
       notifyError(
         'Could not keep the audio engine running. Restart BleepLoop to get back the last saved loops.',
-        'The engine restarted and the loops left with it. A new recording replaces the saved ones.',
+        jackHost ? 'A new recording replaces the saved loops.' : 'The engine restarted and the loops left with it. A new recording replaces the saved ones.',
       );
       break;
     case 'LoopsDropped':
@@ -781,7 +786,10 @@ function setDevice(status: DeviceStatus | null): void {
   // Once per open: WASAPI may run output only (no capture device, a microphone Windows blocks).
   if (status && !status.inputOpen && (device()?.inputOpen ?? true)) {
     console.error(`[engine] ${status.outputName} opened without an input`);
-    notifyError('Could not open the audio input. Check the input device and Windows microphone privacy.', 'The engine plays, but hears nothing.');
+    const advice = status.backend === 'Jack'
+      ? 'No JACK input connected. Check the input device.'
+      : 'Could not open the audio input. Check the input device and Windows microphone privacy.';
+    notifyError(advice, 'The engine plays, but hears nothing.');
   }
   // No device: the playhead holds where it is until the next anchor arrives.
   if (!status) plain.clock = { ...plain.clock, frame: renderedFrame(), atMs: Date.now(), rate: 0 };
@@ -1764,17 +1772,17 @@ function withSlotPicks(choice: DeviceChoice, picks: readonly [InputPick, InputPi
 }
 
 /** The device the saved picks name. */
-function picked(): DeviceChoice {
-  const s = readAudioDeviceSettings();
-  const asio = usingAsio();
+function picked(edit?: DeviceEdit): DeviceChoice {
+  const s = { ...readAudioDeviceSettings(), ...edit };
+  const asio = !jackHost && usingAsio();
   return {
     request: {
-      backend: asio ? 'Asio' : 'Wasapi',
+      backend: jackHost ? 'Jack' : asio ? 'Asio' : 'Wasapi',
       input: asio ? null : s.inputDeviceId || null,
       output: asio ? null : s.outputDeviceId || null,
       inputChannels: [s.slotInputChannels[0], s.slotInputChannels[1]],
       buffer: s.bufferFrames,
-      sampleRate: s.sampleRate,
+      sampleRate: jackHost ? null : s.sampleRate,
     },
     picks: {
       inputDeviceId: s.inputDeviceId,
@@ -1798,8 +1806,12 @@ function picked(): DeviceChoice {
  * the loops cannot play there. The player confirms; declined, the picks go back to the device that runs
  * (which resolves); confirmed, the loops go to the recovery first (`switchDroppingLoops`).
  */
-export function openEngineDevice(): Promise<DeviceStatus | null> {
-  return serialize(async () => (await openPicked()).status);
+export function openEngineDevice(edit?: DeviceEdit): Promise<DeviceStatus | null> {
+  // Resolve the patch inside the queue: a second gesture builds on the first only if it succeeded.
+  return serialize(async () => {
+    const fallback = jackHost && !device() ? jackEndpointFallback() : undefined;
+    return (await openPicked(undefined, fallback ? { ...fallback, ...edit } : edit)).status;
+  });
 }
 
 /** Run `op` after every open queued before it (a failed one does not stop the queue). */
@@ -1811,8 +1823,10 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 
 /** `openEngineDevice`'s open, inside the queue. `declined`: the player kept the device that runs.
  * `restore` (a driver switch's) puts the driver that ran back when a recovery save fails. */
-async function openPicked(restore?: () => Promise<void>): Promise<{ status: DeviceStatus | null; declined: boolean }> {
-  const wanted = picked();
+async function openPicked(restore?: () => Promise<void>, edit?: DeviceEdit): Promise<{ status: DeviceStatus | null; declined: boolean }> {
+  const wanted = picked(edit);
+  // Legacy callers already stored their picks. A pending edit has touched no preference.
+  const rollback = () => { if (edit === undefined) putBackPicks(wanted); };
   try {
     let runs: Running;
     try {
@@ -1825,11 +1839,12 @@ async function openPicked(restore?: () => Promise<void>): Promise<{ status: Devi
         `cannot play there. They stay in recovery and come back the next time BleepLoop starts at ` +
         `${kHz(refused.from)}.\n\nSwitch anyway?`;
       if (!(await confirm({ title: 'Sample rate change', body: question, yes: 'Switch', no: 'Cancel' }))) {
-        putBackPicks(wanted);
+        rollback();
         return { status: device(), declined: true };
       }
-      runs = await switchDroppingLoops(wanted, restore);
+      runs = await switchDroppingLoops(wanted, rollback, restore);
     }
+    if (edit && runs.request === wanted.request) commitDeviceEdit(edit);
     setOpenFailure(null);
     setDevice(runs.status);
     setEngineRate(runs.status.sampleRate);
@@ -1841,7 +1856,7 @@ async function openPicked(restore?: () => Promise<void>): Promise<{ status: Devi
     setOpenFailure(errorText(err));
     // The device that ran keeps running, or the owner reopens it (`Owner::open`,
     // `src-tauri/src/engine_io/owner.rs`): its picks go back, saved and shown.
-    putBackPicks(wanted);
+    rollback();
     return { status: null, declined: false };
   }
 }
@@ -1910,7 +1925,7 @@ function putBackPicks(tried: DeviceChoice): void {
  * or its request would open on the new driver and be refused again. Resolves with the device that runs,
  * as it was asked for.
  */
-async function switchDroppingLoops(wanted: DeviceChoice, restore?: () => Promise<void>): Promise<Running> {
+async function switchDroppingLoops(wanted: DeviceChoice, rollback: () => void, restore?: () => Promise<void>): Promise<Running> {
   await platform.engine.close();
   try {
     await autosave.saveNow();
@@ -1919,7 +1934,7 @@ async function switchDroppingLoops(wanted: DeviceChoice, restore?: () => Promise
     notifyError('Could not switch the audio device. Try again, or export the loops first.', 'The loops could not be saved to recovery first, so they stay here.');
     if (!opened) throw err;
     const ran = opened;
-    putBackPicks(wanted);
+    rollback();
     await restore?.();
     return { ...ran, status: await platform.engine.open(ran.request) };
   }

@@ -349,5 +349,83 @@ check('a driver that runs both but runs at its own: the device rate shown, the p
 check('a rate no player can pick is never offered', () =>
   assert.deepStrictEqual(rateChoice(null, [48000, 96000], null), { options: [null, 48000], shown: null, fixed: false }));
 
+// A refused JACK pick never enters the reload record. A later gesture on another control
+// starts with the last accepted settings even when it was made before the rejection arrived.
+reset();
+globalThis.__LF_JACK__ = true;
+const { openEngineDevice } = await import('../../src/ui/state/engine-store.ts?g=1');
+const { platform } = await import('../../src/platform/index.ts?g=1');
+const settings = await import('../../src/ui/state/audio-settings.ts?g=1');
+const status = { backend: 'Jack', sampleRate: 48000, block: 128, inputName: 'In', outputName: 'Out', alignFrames: 256, inputFrames: 128, inputOpen: true };
+const requests = [];
+const started = Promise.withResolvers();
+const answer = Promise.withResolvers();
+platform.engine.open = async (request) => {
+  requests.push(request);
+  if (request.buffer === 64) {
+    started.resolve();
+    await answer.promise;
+  }
+  return status;
+};
+await openEngineDevice({ outputDeviceId: 'Out', bufferFrames: 128 });
+const refused = openEngineDevice({ bufferFrames: 64 });
+await started.promise;
+const next = openEngineDevice({ inputDeviceId: 'In' });
+const reload = await import('../../src/ui/state/audio-settings.ts?g=2');
+check('a reload during a JACK switch retains the accepted buffer', () =>
+  assert.equal(reload.readAudioDeviceSettings().bufferFrames, 128));
+// The console.error is also the release log. Consume only the two expected failed-open reports.
+const reported = [];
+const realError = console.error;
+async function expectedOpenFailure(open) {
+  try {
+    console.error = (...args) => reported.push(args[0]);
+    return await open();
+  } finally {
+    console.error = realError;
+  }
+}
+const result = await expectedOpenFailure(() => {
+  answer.reject(new Error('JACK declined the test buffer'));
+  return refused;
+});
+await next;
+check('a refused JACK buffer leaves the accepted pick for the next queued route', () => {
+  assert.equal(result, null);
+  assert.equal(requests.at(-1).buffer, 128);
+  assert.equal(requests.at(-1).input, 'In');
+  assert.equal(requests.at(-1).output, 'Out');
+  assert.equal(settings.readAudioDeviceSettings().inputDeviceId, 'In');
+  assert.equal(reload.readAudioDeviceSettings().bufferFrames, 128);
+});
+const reloadedHost = (await import('../../src/platform/index.ts?g=2')).platform;
+const devices = await import('../../src/ui/state/audio-devices.ts?g=2');
+const reopened = (await import('../../src/ui/state/engine-store.ts?g=2')).openEngineDevice;
+let asioQueries = 0;
+reloadedHost.pluginHost.asioStatus = async () => { asioQueries++; };
+await devices.initAudioDeviceSettings();
+await devices.refreshAndPruneDevices(); // Both saved endpoints are now absent from the returned lists.
+check('JACK skips ASIO and preserves missing endpoint picks until a fallback works', () => {
+  assert.equal(asioQueries, 0);
+  assert.equal(reload.readAudioDeviceSettings().inputDeviceId, 'In');
+  assert.equal(reload.readAudioDeviceSettings().outputDeviceId, 'Out');
+});
+reloadedHost.engine.open = async () => { throw new Error('No default JACK output'); };
+await expectedOpenFailure(() => reopened());
+check('a failed default route on reload preserves the last working endpoints', () => {
+  assert.equal(reload.readAudioDeviceSettings().inputDeviceId, 'In');
+  assert.equal(reload.readAudioDeviceSettings().outputDeviceId, 'Out');
+  assert.deepEqual(reported, ['[engine] device open failed', '[engine] device open failed']);
+});
+reloadedHost.engine.open = async () => status;
+await reopened();
+check('the replacement default route is saved once it opens', () => {
+  assert.equal(reload.readAudioDeviceSettings().inputDeviceId, '');
+  assert.equal(reload.readAudioDeviceSettings().outputDeviceId, '');
+  assert.equal(reload.readAudioDeviceSettings().bufferFrames, 128);
+});
+delete globalThis.__LF_JACK__;
+
 console.log(`\n=== RESULT: ${passed}/${passed + failed} checks passed, ${failed} failed ===`);
 process.exit(failed === 0 ? 0 : 1);
