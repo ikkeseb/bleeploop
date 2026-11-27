@@ -140,8 +140,10 @@ cd src-tauri && LF_TEST_CLAP=/tmp/lf-plugins/clap/LfTestGain.clap \
 The scan child runs on its own too: `target/debug/app --scan-one <path>` prints the descriptor. The
 scan walks `~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap`, `CLAP_PATH`, then the same for VST3
 (`~/.vst3`, `VST3_PATH`); `:` separates a path list. A Windows VST3 bridged by yabridge loads Wine in
-the scan child: Archetype Petrucci X had not answered after 60 s (its Wine log showed TLS traffic), so
-the scan's 20 s bound lists it as failed. Plugin editor windows are not hosted on Linux yet.
+the scan child: Archetype Petrucci X (2026-11-27) stopped there on a Wine dialog asking to download and
+install "License Support components", so the scan's 20 s bound lists it as failed until its licensing
+runs in that Wine prefix. Run such a scan on a private X display (`DISPLAY` of an Xvfb): Wine shows its
+dialogs on whatever display the scan child has. Plugin editor windows are not hosted on Linux yet.
 
 In the app: `verify/linux-app/plugin-probe.mjs` runs a debug app (built with `build.devUrl`
 `http://127.0.0.1:14937`, as § Linux desktop audio builds it) on a private PipeWire graph of two null
