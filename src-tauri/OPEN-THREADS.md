@@ -9,6 +9,13 @@
   (`cfg(test)` variants of `REMOVE_TIMEOUT`, `CALLBACK_WAIT`, `START_WAIT`, the owner `ask`; `test_rig::PATIENCE`)
   and stamp the loop's stop on the engine's frame. Next check, only if one fails again: loop it under a
   parallel `cargo build` and read the failing line against these bounds.
+- `rig::restore_tests::close_waits_for_a_forget_in_progress_and_none_runs_after` failed once on CI's
+  Windows runner (dev 1e519cc, 2026-11-27; green on rerun and on the run before): `forgot` was `[1, 2]`,
+  not `[1]`, so unit 2's forget ran after the close, the very thing the test forbids; not a wall bound
+  (its 200 ms sleep only decides `closed_first`). Not understood: a real race between `Rig::close` setting
+  `closing` and the driver starting the next forget, or the test's ticks. Next check: loop the test a few
+  hundred times on Windows under a parallel build; on a red, read the driver's forget start against the
+  `closing` check under `inner` and `calls` (`rig/restore.rs`, `rig/mod.rs`).
 
 - A DEV session shares the release profile's tones and scan cache. `tauri dev` and the release share the
   app's data folder: the rig record is split by build kind (a DEV build keeps its own record and lock), but
