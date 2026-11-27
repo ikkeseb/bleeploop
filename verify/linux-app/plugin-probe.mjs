@@ -3,7 +3,8 @@
 // hosting); PLUGINS_DIR: verify/linux-plugins/build.sh's output. Everything is private: its own PipeWire
 // server with two null sinks (nothing reaches the speakers), its own X display, a temporary HOME, and the
 // test plugins as the only plugin folders. The page picks the CLAP test plugin in slot A and the VST3
-// one in slot B through the slots' own pickers; the runner keeps a screenshot of the window.
+// one in slot B through the slots' own pickers, then Off in slot A unloads its plugin from the running
+// engine; the runner keeps a screenshot of the window.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -94,5 +95,5 @@ await server.close();
 stopAll();
 console.log('temporary folder:', dir);
 assert.equal(outcome.kind, 'done', outcome.error);
-console.log('PASS: both test plugins picked, loaded and listing their Gain in the app');
+console.log('PASS: both test plugins picked, loaded and listing their Gain in the app; slot A unloaded by Off');
 process.exit(0);

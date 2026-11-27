@@ -52,6 +52,20 @@ async function pick(letter, format) {
     report('device', { device: engineDevice() });
     await pick('A', 'clap');
     await pick('B', 'vst3');
+    // Off in slot A: its live-off, then the plugin leaves the running engine and its owner ends.
+    const select = () => document.querySelector('select[aria-label="Source for slot A"]');
+    await until('slot A\'s picker', () => select() && !select().disabled);
+    select().value = 'off';
+    select().dispatchEvent(new Event('change', { bubbles: true }));
+    const end = performance.now() + 15000;
+    let left = null;
+    while (performance.now() < end) {
+      left = await platform.pluginHost.listLoaded();
+      if (!left.some((p) => p.slot === 0)) break;
+      await sleep(100);
+    }
+    if (left.some((p) => p.slot === 0)) throw new Error(`slot A still holds ${JSON.stringify(left)}`);
+    report('unloaded', { slot: 'A', loaded: left.map((p) => `${p.slot}:${p.descriptor.format}`) });
     report('done', {});
   } catch (error) {
     report('failed', { error: String(error?.message ?? error) });

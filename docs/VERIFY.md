@@ -149,7 +149,8 @@ In the app: `verify/linux-app/plugin-probe.mjs` runs a debug app (built with `bu
 `http://127.0.0.1:14937`, as § Linux desktop audio builds it) on a private PipeWire graph of two null
 sinks, its own X display and a temporary HOME, with the test plugins as its only plugin folders, and
 picks the CLAP one in slot A and the VST3 one in slot B through the slots' own pickers. Each must load,
-show its name on the slot and list its Gain. Xvfb is not installed on the Omarchy PC: without root,
+show its name on the slot and list its Gain; then Off in slot A must unload its plugin from the running
+engine. Xvfb is not installed on the Omarchy PC: without root,
 extract the `xorg-server-xvfb` package into a folder and pass its binary as `XVFB`.
 
 ```sh
