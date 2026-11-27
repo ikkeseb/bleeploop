@@ -87,8 +87,8 @@ lf-rig           = { path = "crates/lf-rig" }
 [target.'cfg(target_os = "linux")'.dependencies]
 libloading       = "0.8"
 # Plugin editor windows (`src/host/editor_window_linux.rs`): an X11 top-level per hosted editor, one
-# connection per owner thread, pure Rust (no libxcb link, no optional features).
-x11rb            = { version = "0.14", default-features = false }
+# connection per owner thread, pure Rust (no libxcb link); RandR for the monitors it centres on.
+x11rb            = { version = "0.14", default-features = false, features = ["randr"] }
 # The owner's `poll()` over its X connection and the plugin's run-loop fds (the same module).
 libc             = "0.2"
 

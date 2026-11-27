@@ -10,11 +10,16 @@
 //! does the Win32 close box. Fixed size (min = max size hints), as the Win32 window is; the plugin's
 //! own resize requests land in `set_client_size`. **Placement:** the window opens centred on the
 //! monitor the BleepLoop window is on (`set_placement`, from the open command), its position in both
-//! the window's geometry and `WM_NORMAL_HINTS` (program-specified): Hyprland (0.56) floats it for its
-//! fixed size and places an X11 window where its geometry says, the top left of the first monitor
-//! for one at (0, 0); a window manager that does its own placement may ignore it. The main window is
-//! a Wayland client, so no `WM_TRANSIENT_FOR` can name it, and Wayland tells no client where a
-//! window sits: centred on its monitor is the closest to "over the app" an X11 window can ask for. The window's own `ConfigureNotify` records the size
+//! the window's geometry and `WM_NORMAL_HINTS` (program-specified), and a resize before it is shown
+//! centres it again: Hyprland (0.56) floats it for its fixed size and places an X11 window where its
+//! geometry says, the top left of the first monitor for one at (0, 0); a window manager that does its
+//! own placement may ignore it. The toolkit's monitor is in Wayland's layout, the window's position in
+//! XWayland's (Hyprland packs its outputs left to right, at native size with `force_zero_scaling`),
+//! so the window centres on the RandR monitor of the same size (`x_monitor`); Hyprland moves a window
+//! whose middle lands on another monitor than its own to the same offset on its own, which puts it
+//! right among monitors of one size. The main window is a Wayland client, so no `WM_TRANSIENT_FOR` can
+//! name it, and Wayland tells no client where a window sits: centred on its monitor is the closest to
+//! "over the app" an X11 window can ask for. The window's own `ConfigureNotify` records the size
 //! it really has (`client_size`); **known limit:** a window manager that configures it to another size
 //! is logged, but the plugin is not told (no renegotiation). Creation, its properties and its map are
 //! checked requests, so an open the X server refused fails. The window is a minimal XEmbed embedder:
@@ -54,6 +59,7 @@ use x11rb::connection::Connection;
 use x11rb::cookie::VoidCookie;
 use x11rb::errors::ConnectionError;
 use x11rb::properties::{WmSizeHints, WmSizeHintsSpecification};
+use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xproto::{
     AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, NotifyDetail,
     NotifyMode, PropMode, StackMode, WindowClass,
@@ -316,6 +322,8 @@ struct Window {
     children: Vec<u32>,
     /// The top-level has the focus (the XEmbed "window active" state).
     active: bool,
+    /// The X monitor it opens centred on, until it is shown.
+    place: Option<Rect>,
 }
 
 /// What an embedded child is told about its embedder's focus.
@@ -327,7 +335,7 @@ enum Activation {
 
 impl Window {
     fn new(xid: u32, size: (u32, u32)) -> Window {
-        Window { xid, size, asked: size, asked_seq: 0, closed: false, children: Vec::new(), active: false }
+        Window { xid, size, asked: size, asked_seq: 0, closed: false, children: Vec::new(), active: false, place: None }
     }
 
     /// A child was created in or reparented into this window: true when it is new (to embed).
@@ -417,9 +425,23 @@ impl Display {
     /// Create the window, its properties and (in a test build) its map as checked requests: an open
     /// the X server refused is an error, never a success with no window. A failed step destroys what
     /// was created.
-    fn create(&mut self, width: u32, height: u32, title: &str, monitor: Option<Rect>) -> XResult<u32> {
+    /// The X screen's monitors (RandR); none when the server does not say.
+    fn monitors(&self) -> Vec<Rect> {
+        let reply = self.conn.randr_get_monitors(self.root, true).ok().and_then(|c| c.reply().ok());
+        reply
+            .map(|r| {
+                r.monitors
+                    .iter()
+                    .map(|m| Rect { x: m.x.into(), y: m.y.into(), width: m.width.into(), height: m.height.into() })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn create(&mut self, width: u32, height: u32, title: &str, placement: Option<Placement>) -> XResult<u32> {
         let (w, h) = (side(width), side(height));
-        let at = monitor.map(|m| centred(m, self.screen, w, h));
+        let place = placement.map(|p| x_monitor(&self.monitors(), p));
+        let at = place.map(|m| centred(m, self.screen, w, h));
         let (x, y) = at.unwrap_or((0, 0));
         let xid = self.conn.generate_id()?;
         // Structure: its own close, configure and destroy; substructure: the plugin's window arriving
@@ -460,15 +482,23 @@ impl Display {
             let _ = self.conn.flush();
             return Err(e);
         }
-        self.windows.push(Window::new(xid, (w, h)));
+        let mut window = Window::new(xid, (w, h));
+        window.place = place;
+        self.windows.push(window);
         Ok(xid)
     }
 
     fn resize(&mut self, xid: u32, width: u32, height: u32) -> XResult<(u32, u32)> {
         let (w, h) = (side(width), side(height));
+        // Not shown yet (a plugin that resizes as it attaches): centred again at its new size.
+        let at = self.window(xid).and_then(|win| win.place).map(|m| centred(m, self.screen, w, h));
         // Hints first: a window manager holds a configure against the min/max size it last read.
-        drop(fixed_size(&self.conn, xid, w, h, None)?);
-        let seq = self.conn.configure_window(xid, &ConfigureWindowAux::new().width(w).height(h))?.sequence_number();
+        drop(fixed_size(&self.conn, xid, w, h, at)?);
+        let mut configure = ConfigureWindowAux::new().width(w).height(h);
+        if let Some((x, y)) = at {
+            configure = configure.x(i32::from(x)).y(i32::from(y));
+        }
+        let seq = self.conn.configure_window(xid, &configure)?.sequence_number();
         self.conn.flush()?;
         if let Some(win) = self.window(xid) {
             win.size = (w, h);
@@ -478,8 +508,11 @@ impl Display {
         Ok((w, h))
     }
 
-    /// Map (checked) and raise.
-    fn show(&self, xid: u32) -> XResult<()> {
+    /// Map (checked) and raise. Its place is the window manager's from here.
+    fn show(&mut self, xid: u32) -> XResult<()> {
+        if let Some(win) = self.window(xid) {
+            win.place = None;
+        }
         self.conn.map_window(xid)?.check()?;
         self.conn.configure_window(xid, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE))?;
         self.conn.flush()?;
@@ -664,13 +697,31 @@ fn centred(monitor: Rect, screen: Rect, w: u32, h: u32) -> (i16, i16) {
     (axis(monitor.x, monitor.width, w, screen.x + screen.width), axis(monitor.y, monitor.height, h, screen.y + screen.height))
 }
 
-/// The monitor the next editor window opens centred on (module doc), set by the open command.
-static PLACEMENT: Mutex<Option<Rect>> = Mutex::new(None);
+/// The monitor the BleepLoop window is on, as the toolkit reports it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Placement {
+    /// In physical pixels, in the Wayland layout.
+    pub monitor: Rect,
+    /// Its scale (physical pixels per logical one).
+    pub scale: f64,
+}
 
-/// Set the monitor the next editor window opens centred on: the BleepLoop window's, in physical
-/// pixels, or `None` for the top left of the screen.
-pub(super) fn set_placement(monitor: Option<Rect>) {
-    *PLACEMENT.lock().unwrap_or_else(|e| e.into_inner()) = monitor;
+/// The X monitor a window opens centred on: the first RandR monitor the size of the toolkit's, in
+/// physical or in logical pixels (module doc), else the toolkit's own rectangle.
+fn x_monitor(found: &[Rect], p: Placement) -> Rect {
+    let m = p.monitor;
+    let scale = if p.scale.is_finite() && p.scale > 0.0 { p.scale } else { 1.0 };
+    let logical = ((f64::from(m.width) / scale).round() as i32, (f64::from(m.height) / scale).round() as i32);
+    found.iter().copied().find(|x| (x.width, x.height) == (m.width, m.height) || (x.width, x.height) == logical).unwrap_or(m)
+}
+
+/// The monitor the next editor window opens centred on (module doc), set by the open command. One
+/// main window, so concurrent opens set the same monitor.
+static PLACEMENT: Mutex<Option<Placement>> = Mutex::new(None);
+
+/// Set the monitor the next editor window opens centred on, or `None` for the top left of the screen.
+pub(super) fn set_placement(placement: Option<Placement>) {
+    *PLACEMENT.lock().unwrap_or_else(|e| e.into_inner()) = placement;
 }
 
 #[derive(Default)]
@@ -809,7 +860,7 @@ pub(super) fn set_client_size(hwnd: HWND, width: u32, height: u32) -> Option<(u3
 /// manager's call. A map the X server refused fails the open (its caller tears the editor down).
 pub(super) fn show_host_window_front(hwnd: HWND) -> Result<(), String> {
     let xid = hwnd.xid().ok_or("no editor window to show")?;
-    with_owner(|o| match o.display.as_ref() {
+    with_owner(|o| match o.display.as_mut() {
         Some(display) => display.show(xid).map_err(|e| format!("showing the editor window: {e}")),
         None => Err("no X connection for the editor window".to_string()),
     })
@@ -989,26 +1040,46 @@ mod tests {
         assert_eq!(centred(elsewhere, screen, 1141, 711), (4480 - 1141, 1440 - 711), "a monitor off the X screen: kept on it");
     }
 
-    /// On a private X server only (`env -u WAYLAND_DISPLAY DISPLAY=:9x`, an Xvfb at 4480x1440: the
-    /// owner's two monitors side by side), never the desktop's display: the window opens where
-    /// `centred` puts it and says so in its geometry and its program-specified position hint.
+    /// Wayland stacks the 1920x1080 monitor above the other; XWayland packs it to the right at y 0.
     #[test]
-    #[ignore = "needs a private Xvfb at 4480x1440: docs/VERIFY.md § Linux plugin hosting"]
+    fn the_x_monitor_is_the_one_of_the_toolkits_size() {
+        let x = [Rect { x: 0, y: 0, width: 2560, height: 1440 }, Rect { x: 2560, y: 0, width: 1920, height: 1080 }];
+        let above = Rect { x: 320, y: -1080, width: 1920, height: 1080 };
+        assert_eq!(x_monitor(&x, Placement { monitor: above, scale: 1.0 }), x[1]);
+        let scaled = Rect { x: 0, y: 0, width: 3840, height: 2160 };
+        assert_eq!(x_monitor(&x, Placement { monitor: scaled, scale: 2.0 }), x[1], "logical size without zero scaling");
+        assert_eq!(x_monitor(&x, Placement { monitor: scaled, scale: 1.0 }), scaled, "no such monitor: the toolkit's own");
+        assert_eq!(x_monitor(&[], Placement { monitor: above, scale: f64::NAN }), above, "no RandR answer");
+    }
+
+    /// On a private X server only (`env -u WAYLAND_DISPLAY DISPLAY=:9x`, an Xvfb at 1920x1080: its
+    /// one RandR monitor), never the desktop's display: the window opens centred on the X monitor of
+    /// the toolkit's size, says so in its geometry and its program-specified position hint, and a
+    /// resize before it is shown centres it again.
+    #[test]
+    #[ignore = "needs a private Xvfb at 1920x1080: docs/VERIFY.md § Linux plugin hosting"]
     fn an_editor_window_asks_for_its_centred_place() {
         use x11rb::properties::WmSizeHints;
-        let monitor = Rect { x: 2560, y: 0, width: 1920, height: 1080 };
-        set_placement(Some(monitor));
-        let win = create_host_window(1141, 711).expect("host window");
+        // Wayland's layout has the 1920x1080 monitor above another; the X screen has it at its origin.
+        let monitor = Rect { x: 320, y: -1080, width: 1920, height: 1080 };
+        set_placement(Some(Placement { monitor, scale: 1.0 }));
+        let win = create_host_window(800, 600).expect("host window");
         set_placement(None);
         let xid = win.hwnd.xid().expect("an XID");
         let (conn, _) = x11rb::connect(None).expect("the private X display");
-        let geometry = conn.get_geometry(xid).unwrap().reply().unwrap();
-        assert_eq!((geometry.x, geometry.y, geometry.width, geometry.height), (2949, 184, 1141, 711));
-        let hints = WmSizeHints::get_normal_hints(&conn, xid).unwrap().reply().unwrap().expect("WM_NORMAL_HINTS");
-        let position = hints.position.expect("a position hint");
-        assert!(matches!(position.0, WmSizeHintsSpecification::ProgramSpecified), "program-specified");
-        assert_eq!((position.1, position.2), (2949, 184));
-        assert_eq!((hints.min_size, hints.max_size), (Some((1141, 711)), Some((1141, 711))), "fixed size");
+        let place = |what: &str| {
+            let g = conn.get_geometry(xid).unwrap().reply().unwrap();
+            let hints = WmSizeHints::get_normal_hints(&conn, xid).unwrap().reply().unwrap().expect("WM_NORMAL_HINTS");
+            let position = hints.position.unwrap_or_else(|| panic!("{what}: a position hint"));
+            assert!(matches!(position.0, WmSizeHintsSpecification::ProgramSpecified), "{what}: program-specified");
+            assert_eq!((position.1, position.2), (i32::from(g.x), i32::from(g.y)), "{what}: the hint says the geometry");
+            assert_eq!(hints.min_size, hints.max_size, "{what}: a fixed size");
+            (g.x, g.y, g.width, g.height)
+        };
+        assert_eq!(place("at creation"), (560, 240, 800, 600));
+        // The plugin resizes as it attaches, before the window is shown: centred again.
+        assert_eq!(set_client_size(win.hwnd, 1141, 711), Some((1141, 711)));
+        assert_eq!(place("after the resize"), (389, 184, 1141, 711));
         drop(win);
     }
 

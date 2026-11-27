@@ -492,18 +492,19 @@ pub async fn plugin_open_editor(slot: u8, frontend_epoch: u32, app: tauri::AppHa
         Err(format!("plugin_open_editor is Windows-only (slot={slot})"))
     }
 }
-/// The monitor the main window is on, in physical pixels; `None` when it cannot be read.
+/// The monitor the main window is on, as the toolkit reports it; `None` when it cannot be read.
 #[cfg(target_os = "linux")]
-fn main_window_monitor(app: &tauri::AppHandle) -> Option<super::editor_window::Rect> {
+fn main_window_monitor(app: &tauri::AppHandle) -> Option<super::editor_window::Placement> {
     use tauri::Manager;
     let monitor = app.get_webview_window("main")?.current_monitor().ok()??;
     let (at, size) = (monitor.position(), monitor.size());
-    Some(super::editor_window::Rect {
+    let monitor_rect = super::editor_window::Rect {
         x: at.x,
         y: at.y,
         width: i32::try_from(size.width).ok()?,
         height: i32::try_from(size.height).ok()?,
-    })
+    };
+    Some(super::editor_window::Placement { monitor: monitor_rect, scale: monitor.scale_factor() })
 }
 
 /// P10.0: hide + destroy the slot's plugin editor (owner thread), for the document with

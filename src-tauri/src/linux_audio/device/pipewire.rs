@@ -66,8 +66,10 @@ fn output(command: &mut Command, limit: Duration) -> Result<String, String> {
     String::from_utf8(out).map_err(|_| "printed text that is not UTF-8".into())
 }
 
-/// A node is a webcam when its props, or its device's, carry `device.form-factor` "webcam". JACK
-/// names a node's client after one of its description, nick or name, so all three are returned.
+/// A node is a webcam when its props, or its device's, carry `device.form-factor` "webcam". Every
+/// client name pipewire-jack can give it is returned: its description, nick or name (the first set,
+/// in that order, unless `jack.short-name` puts the nick first), prefixed `<app.name>/` when the node
+/// has another app name, and either of those with `-<object id>` when another node took the name.
 pub(super) fn webcam_names(text: &str) -> HashSet<String> {
     let objects: Vec<Value> = match serde_json::from_str(text) {
         Ok(objects) => objects,
@@ -96,10 +98,18 @@ pub(super) fn webcam_names(text: &str) -> HashSet<String> {
             .and_then(id)
             .is_some_and(|d| devices.contains(&d));
         if webcam(&p) || on_webcam {
+            let app = p.get("application.name").and_then(Value::as_str);
+            let suffix = node.get("id").and_then(id).map(|n| format!("-{n}"));
             for key in ["node.description", "node.nick", "node.name"] {
-                if let Some(name) = p.get(key).and_then(Value::as_str) {
-                    names.insert(name.to_owned());
+                let Some(base) = p.get(key).and_then(Value::as_str) else { continue };
+                let mut forms = vec![base.to_owned()];
+                if let Some(app) = app.filter(|&a| a != base) {
+                    forms.push(format!("{app}/{base}"));
                 }
+                if let Some(suffix) = &suffix {
+                    forms.extend(forms.clone().into_iter().map(|f| f + suffix));
+                }
+                names.extend(forms);
             }
         }
     }
@@ -125,6 +135,9 @@ mod tests {
             "node.description": "Other Cam", "node.name": "alsa_input.other", "device.id": "57"}}},
           {"id": 86, "type": "PipeWire:Interface:Node", "info": {"props": {
             "node.description": "EVO4 0", "node.name": "alsa_input.hw_EVO4_0", "device.id": 58}}},
+          {"id": 88, "type": "PipeWire:Interface:Node", "info": {"props": {
+            "node.description": "Node Cam", "device.id": 58, "device.form-factor": "webcam",
+            "application.name": "camd"}}},
           {"id": 90, "type": "PipeWire:Interface:Node", "info": {"props": {
             "node.description": "Virtual", "device.form-factor": "headset-ish"}}},
           {"id": 91, "type": "PipeWire:Interface:Node", "info": null}
@@ -132,10 +145,20 @@ mod tests {
         let names = webcam_names(dump);
         let want: HashSet<String> = [
             "C920 Webcam Mic",
+            "C920 Webcam Mic-73",
             "C920 Mic",
+            "C920 Mic-73",
             "alsa_input.c920",
+            "alsa_input.c920-73",
             "Other Cam",
+            "Other Cam-74",
             "alsa_input.other",
+            "alsa_input.other-74",
+            // On the node only (its device is not a webcam), under another app name.
+            "Node Cam",
+            "camd/Node Cam",
+            "Node Cam-88",
+            "camd/Node Cam-88",
         ]
         .map(String::from)
         .into();
