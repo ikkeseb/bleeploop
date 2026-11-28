@@ -482,7 +482,12 @@ const LANE_NAMES = ['1', '2', '3', '4', '5'];
 const BAND_TOP = 0.1; // of the height: under the top HUD band
 const BAND = 0.78; // of the height: above the message line
 const HUD_GAP = 8; // CSS px: the card's least gap under the HUD band (as ORBIT and EMBER)
-const GUTTER = 84; // CSS px: the head column that carries the lane numbers
+const GUTTER = 84; // CSS px: the head column's least width
+/** The head column's least margin each side of the widest lane number, of the number's size: the
+ * tightest the 84 px column gives at 1000x700 to 1920x1080 (SCOPE at 1920x1080, 0.29), so the column
+ * widens only where the numbers reach their 82 px cap (0.18 in 84 px: STRATA at 1920x1080, both looks
+ * at 2560x1440). */
+const NUM_MARGIN = 0.28;
 const FRAME = 8; // CSS px: the panel card's frame around top, right and bottom of the recessed glass pane
 
 /**
@@ -553,7 +558,19 @@ export function layoutPanel(p: Panel, s: Surface, leadUnits: number, leadPx: num
   const th = lead + LANES * unit;
   const px = Math.round(hudPad(s.h) * dpr);
   const bezel = Math.max(2, Math.round(3 * dpr));
-  const x0 = px + Math.round(GUTTER * dpr);
+  // Legends (`--font-legend`: 600 caps), large `--font-name` for the lane numbers; the head column
+  // fits the widest number with `NUM_MARGIN` each side. Measured, so the font's own advance counts:
+  // the stage loop lays out again once the fonts are in.
+  const legPx = Math.round(clamp(0.013 * s.h, 12, 17) * dpr);
+  const numPx = Math.round(clamp(unit * 0.56, 26 * dpr, 82 * dpr));
+  p.legendFont = `600 ${legPx}px 'Instrument Sans', system-ui, sans-serif`;
+  p.numFont = `650 ${numPx}px 'Instrument Sans', system-ui, sans-serif`;
+  s.ctx.save();
+  s.ctx.font = p.numFont;
+  let adv = 0;
+  for (const n of LANE_NAMES) adv = Math.max(adv, s.ctx.measureText(n).width);
+  s.ctx.restore();
+  const x0 = px + Math.max(Math.round(GUTTER * dpr), Math.ceil(adv + 2 * NUM_MARGIN * numPx) + bezel);
   const tw = Math.max(8, W - px - frame - x0);
   p.dpr = dpr;
   p.frame = frame;
@@ -573,11 +590,6 @@ export function layoutPanel(p: Panel, s: Surface, leadUnits: number, leadPx: num
   p.groove = Math.max(2, Math.round(2 * dpr));
   p.headMid = px + ((x0 - bezel - px) >> 1);
   p.sheenH = Math.round(2 * unit * 0.35);
-  // Legends (`--font-legend`: 600 caps), large `--font-name` for the lane numbers.
-  const legPx = Math.round(clamp(0.013 * s.h, 12, 17) * dpr);
-  const numPx = Math.round(clamp(unit * 0.56, 26 * dpr, 82 * dpr));
-  p.legendFont = `600 ${legPx}px 'Instrument Sans', system-ui, sans-serif`;
-  p.numFont = `650 ${numPx}px 'Instrument Sans', system-ui, sans-serif`;
   p.laneTopCss = (top + lead) / dpr;
   p.laneCss = unit / dpr;
   p.card = new Path2D();

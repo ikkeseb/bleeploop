@@ -72,11 +72,12 @@
  *   look alone (as the `stageNextView` action does there, a pedal's path), and inside it steps the look
  *   and sends the engine nothing but the `SetScope` that step owes; a pad key released with
  *   Shift down still releases its pad.
- * - shots: for the eye, per look and size: a rich scene (four lanes with different loops: playing,
- *   muted, overdubbing, stopped, and one empty), with the engine's live scope columns fed in over the
- *   whole loop and the newest one at the playhead, at three loop phases, a later take recording, an armed
- *   wait, a first take, LISTENING, the count-in and the rest state, in logs/stage-view/, plus tiled
- *   sheets (sheet-<look>-<a|b>.png). The run first empties the folder's PNGs.
+ * - shots: for the eye, per look and size (the three above and the owner's 2560x1440): a rich scene
+ *   (four lanes with different loops: playing, muted, overdubbing, stopped, and one empty), with the
+ *   engine's live scope columns fed in over the whole loop and the newest one at the playhead, at three
+ *   loop phases, a later take recording, an armed wait, a first take, LISTENING, the count-in and the
+ *   rest state, in logs/stage-view/, plus tiled sheets (sheet-<look>-<a|b>.png). The run first empties
+ *   the folder's PNGs.
  *
  * Cannot see the native engine (the looper state machine, count-in, takes, overdubs and refusals are
  * lf-engine's tests), Tauri IPC, WebView2, the GPU the owner's machine draws with, or the distance the
@@ -149,20 +150,28 @@ const LANE1_ONLY = { 0: 0.8 };
  */
 function scopeRig(k) {
   const el = () => document.querySelector('.sv-canvas');
-  /** The scope look's own layout (`src/ui/stage/scope.ts` `layout`): the HUD's band and side padding,
-   * the gutter that carries the bay names, and the hero bay two lane-heights tall. */
+  /** The scope look's own layout (`src/ui/stage/scope.ts` `layout`, the panel's `visual.ts`
+   * `layoutPanel`): the HUD's band and side padding, the head column that carries the bay names (at
+   * least 84 CSS px, else the widest lane number at its size plus 0.28 of that size each side and the
+   * pane's bezel), and the hero bay two lane-heights tall. */
   const geom = () => {
     const c = el();
     const dpr = c.width / c.clientWidth;
     const pad = Math.round(Math.min(24, Math.max(12, 0.02 * c.clientHeight)) * dpr);
-    const x0 = pad + Math.round(84 * dpr);
+    const unit = Math.max(6, Math.floor((0.78 * c.height) / 7));
+    const numPx = Math.round(Math.min(82 * dpr, Math.max(26 * dpr, unit * 0.56)));
+    const m = document.createElement('canvas').getContext('2d');
+    m.font = `650 ${numPx}px 'Instrument Sans', system-ui, sans-serif`;
+    const adv = Math.max(...['1', '2', '3', '4', '5'].map((n) => m.measureText(n).width));
+    const bezel = Math.max(2, Math.round(3 * dpr));
+    const x0 = pad + Math.max(Math.round(84 * dpr), Math.ceil(adv + 2 * 0.28 * numPx) + bezel);
     const frame = Math.round(8 * dpr);
     return {
       dw: c.width,
       dh: c.height,
       dpr,
       top: Math.round(0.1 * c.height),
-      unit: Math.max(6, Math.floor((0.78 * c.height) / 7)),
+      unit,
       x0,
       tw: Math.max(8, c.width - pad - frame - x0),
       cw: (span) => Math.max(1, Math.ceil(((Math.max(8, c.width - pad - frame - x0)) * k.bin) / span)),
@@ -1841,11 +1850,13 @@ await probe(async ({ browser, open }) => {
   });
 
   await group('shots', async () => {
+    // The owner's display (a 27" 2560x1440, played standing about 1.5 m off) is shot for the eye too.
+    const shotSizes = [...viewports, [2560, 1440]];
     const GUITAR = { meter: { peak: [0.32, 0], clip: [false, false] } };
     await setOpen(true);
     for (const v of VIEWS) {
       await showView(v.id);
-      for (const [width, height] of viewports) {
+      for (const [width, height] of shotSizes) {
         vp = `${width}x${height}`;
         await page.setViewportSize({ width, height });
         await page.mouse.move(width / 2, height / 2);
@@ -1892,13 +1903,13 @@ await probe(async ({ browser, open }) => {
       await boot(page);
     }
     // Tiled sheets for the eye: per look, sizes across, scenes down.
-    const sheet = await browser.newPage({ viewport: { width: 1900, height: 1000 } });
+    const sheet = await browser.newPage({ viewport: { width: 2560, height: 1000 } });
     for (const v of VIEWS) {
       for (const [part, scenes] of [['a', ['rich-a', 'rich-b', 'rich-c', 'rest']], ['b', ['later-take', 'armed', 'count-in', 'first-take', 'listening']]]) {
         const rows = [];
         for (const scene of scenes) {
           const cells = [];
-          for (const [width, height] of viewports) {
+          for (const [width, height] of shotSizes) {
             const shot = shots.find((s) => s.view === v.id && s.scene === scene && s.vp === `${width}x${height}`);
             if (shot) cells.push(`<figure><img src="data:image/png;base64,${(await readFile(shot.file)).toString('base64')}"><figcaption>${v.id} · ${scene} · ${shot.vp}</figcaption></figure>`);
           }
