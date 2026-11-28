@@ -731,8 +731,8 @@ function createScope(): ViewDraw {
   }
 
   /** The lane whose bay holds the point. The hero bay is the room, not a lane. */
-  function hit(_x: number, y: number): number {
-    return panelHit(panel, y);
+  function hit(x: number, y: number): number {
+    return panelHit(panel, x, y);
   }
 
   return {

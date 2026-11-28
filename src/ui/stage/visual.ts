@@ -37,6 +37,13 @@ export interface Palette {
   dub: string;
   play: string;
   cyan: string;
+  /** The LED ladder's lit zones and their unlit segments (`--meter-*`). */
+  meterG: string;
+  meterY: string;
+  meterR: string;
+  meterGOff: string;
+  meterYOff: string;
+  meterROff: string;
 }
 
 /** The colour tokens, read once per mount (a token edit over HMR needs a reload, as in waveform.ts). */
@@ -62,6 +69,12 @@ export function readPalette(el: Element): Palette {
     dub: v('--dub', '#ffae2a'),
     play: v('--play', '#45d295'),
     cyan: v('--cyan', '#46d4e8'),
+    meterG: v('--meter-g', '#4fd98f'),
+    meterY: v('--meter-y', '#ffb02e'),
+    meterR: v('--meter-r', '#ff4a5a'),
+    meterGOff: v('--meter-g-off', '#1b2620'),
+    meterYOff: v('--meter-y-off', '#2e2716'),
+    meterROff: v('--meter-r-off', '#4a2026'),
   };
 }
 
@@ -520,6 +533,7 @@ export interface Panel {
   sheenH: number; // the pane's top reflection's height
   numFont: string;
   legendFont: string;
+  legPx: number; // the legends' size, device px
   /** CSS px, for a hit test: lane 1's bay's top and one bay's height. */
   laneTopCss: number;
   laneCss: number;
@@ -535,7 +549,7 @@ export interface Panel {
 export function createPanel(): Panel {
   return {
     dpr: 1, px: 0, ww: 0, ch: 0, frame: 8, bezel: 3, rCard: 8, rWell: 6, x0: 0, tw: 0, top: 0, th: 0, unit: 0, lead: 0,
-    hair: 1, groove: 2, headMid: 0, sheenH: 0, numFont: '', legendFont: '', laneTopCss: 0, laneCss: 1,
+    hair: 1, groove: 2, headMid: 0, sheenH: 0, numFont: '', legendFont: '', legPx: 12, laneTopCss: 0, laneCss: 1,
     card: null, well: null, liveWell: null, sheen: null, topShadow: null,
   };
 }
@@ -564,6 +578,7 @@ export function layoutPanel(p: Panel, s: Surface, leadUnits: number, leadPx: num
   const legPx = Math.round(clamp(0.013 * s.h, 12, 17) * dpr);
   const numPx = Math.round(clamp(unit * 0.56, 26 * dpr, 82 * dpr));
   p.legendFont = `600 ${legPx}px 'Instrument Sans', system-ui, sans-serif`;
+  p.legPx = legPx;
   p.numFont = `650 ${numPx}px 'Instrument Sans', system-ui, sans-serif`;
   s.ctx.save();
   s.ctx.font = p.numFont;
@@ -609,8 +624,10 @@ export function layoutPanel(p: Panel, s: Surface, leadUnits: number, leadPx: num
   s.countSize = clamp(0.36 * s.h, 140, 480);
 }
 
-/** The lane a point is over (CSS px, the pane's lane bays), or -1. */
-export function panelHit(p: Panel, y: number): number {
+/** The lane a point is over (CSS px: a lane's head or bay, inside the card's span), or -1. */
+export function panelHit(p: Panel, x: number, y: number): number {
+  const dx = x * p.dpr;
+  if (dx < p.px || dx >= p.px + p.ww) return -1;
   const i = Math.floor((y - p.laneTopCss) / p.laneCss);
   return i >= 0 && i < LANES ? i : -1;
 }
