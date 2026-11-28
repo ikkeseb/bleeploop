@@ -76,7 +76,10 @@ function createStrata(): ViewDraw {
   const dubStrips = Array.from({ length: LANES }, () => document.createElement('canvas'));
   const dctx = dubStrips.map((strip) => strip.getContext('2d'));
   /** Per lane: the loops the current overdub has run (0..1, the phase stepped since it began), -1 while
-   * the lane does not overdub. */
+   * the lane does not overdub. Counted by this look's own frames, so it knows only what it saw: opened or
+   * switched to mid-overdub, the amber starts at the now line (it understates, never overstates), and a
+   * draw gap over half a loop (a hidden window) steps the shorter way round. The feed carries no overdub
+   * start to do better. */
   const dubRun = new Float64Array(LANES).fill(-1);
   let shownPhase = 0; // the phase the last frame drew
   // The IN cell, in the head column beside the ruler: the legend and its meter's segments.

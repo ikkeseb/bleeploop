@@ -551,12 +551,14 @@ await probe(async ({ browser, open }) => {
     const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
     const out = { play: 0, rec: 0, dub: 0, warm: 0, grey: 0, bright: 0, lit: 0 };
     const dubCol = new Uint16Array(c.width); // amber pixels per column
+    const headCol = new Uint16Array(c.width); // the now line's pixels per column: a bright, unsaturated pixel
     let dist = 0;
     let height = 0;
     for (let p = 0; p < d.length; p += 4) {
       const r = d[p], g = d[p + 1], b = d[p + 2];
       if (Math.max(r, g, b) < 40) continue;
       out.lit++;
+      if (Math.min(r, g, b) > 150 && Math.max(r, g, b) - Math.min(r, g, b) < 60) headCol[(p / 4) % c.width]++;
       if (g > 80 && g - r > 40 && g - b > 15) out.play++;
       else if (r > 140 && g < 90 && r - g > 70) out.rec++;
       else if (r > 150 && g >= 90 && r - b > 80) {
@@ -574,8 +576,16 @@ await probe(async ({ browser, open }) => {
     }
     // The columns holding amber (4 px or more): a playhead's few, or a layer's span.
     let dubCols = 0;
+    let dubMin = -1, dubMax = -1, nowCol = 0;
+    dubCol.forEach((n, x) => {
+      if (n >= 4) {
+        if (dubMin < 0) dubMin = x;
+        dubMax = x;
+      }
+      if (headCol[x] > headCol[nowCol]) nowCol = x;
+    });
     for (const n of dubCol) if (n >= 4) dubCols++;
-    return { ...out, dubCols: Math.round(dubCols / scale), warmDist: Math.round(dist / Math.max(1, out.warm) / scale), warmY: Math.round(height / Math.max(1, out.warm) / scale) };
+    return { ...out, nowCol: Math.round(nowCol / scale), dubMin: Math.round(dubMin / scale), dubMax: Math.round(dubMax / scale), dubCols: Math.round(dubCols / scale), warmDist: Math.round(dist / Math.max(1, out.warm) / scale), warmY: Math.round(height / Math.max(1, out.warm) / scale) };
   });
   /** Wait until no lane's slow light can move a pixel any more, and return the shown phase. `light.slow`
    * is a 400 ms follower Strata rounds into a ribbon's height (`rowH * (0.84 + 0.16 * slow)`): a stopped
@@ -839,10 +849,13 @@ await probe(async ({ browser, open }) => {
       await settle(200);
       dubs.push(await census());
       const dub = dubs[0].dub >= dubs[1].dub ? dubs[0] : dubs[1];
+      // The same overdub 700 ms on: its written layer must have grown (at most one of these is a flash frame).
+      await settle(500);
+      dubs.push(await census());
       await laterTake(true, 3 * BAR);
       await settle(300);
       const rec = await census();
-      console.log(JSON.stringify({ view: v.id, empty, play, muted, stop, dub, rec, restMoved, playMoved, phases }));
+      console.log(JSON.stringify({ view: v.id, dubs: dubs.map((d) => [d.nowCol, d.dubMin, d.dubMax, d.dubCols]), empty, play, muted, stop, dub, rec, restMoved, playMoved, phases }));
       assert.ok(play.play > 1500, `PLAYING draws in the play colour (${play.play} px)`);
       assert.ok(empty.play === 0 && empty.lit < play.lit / 3, `EMPTY is near the floor (${empty.lit} lit px against ${play.lit})`);
       assert.ok(muted.play < play.play * 0.02, `MUTED has no play colour left (${muted.play} px)`);
@@ -852,6 +865,14 @@ await probe(async ({ browser, open }) => {
       // STRATA's playhead alone is amber in the dub's bay, 2 or 3 columns wide: the layer the overdub has
       // written in its 400 ms or more (about 29 CSS px of the 16 s loop at 1280x820) must span far wider.
       if (v.id === 'strata') assert.ok(dub.dubCols >= 15, `strata: the overdub's written layer reads amber across ${dub.dubCols} CSS px of columns (want 15 or more: the playhead alone is about 3)`);
+      if (v.id === 'strata') {
+        // The layer lies behind the now line (the playhead's own width and a few px of antialiasing apart) and grows with the take.
+        for (const d of dubs) assert.ok(d.dubMax <= d.nowCol + 6, `strata: no amber right of the now line (amber reaches x ${d.dubMax}, the now line is at ${d.nowCol} CSS px)`);
+        const reach = (d) => d.nowCol - d.dubMin;
+        const early = Math.min(reach(dubs[0]), reach(dubs[1]));
+        const late = reach(dubs[2]);
+        assert.ok(late >= early + 20, `strata: the overdub's layer grows with the take (reaches ${early} CSS px back, then ${late} px 700 ms on; want 20 more)`);
+      }
       assert.ok(rec.rec > 300, `a recording take draws in rec-red (${rec.rec} px)`);
       assert.ok(phases[1] !== phases[0], 'control: the engine phase runs on at rest');
       assert.ok(restMoved < 40, `at rest the drawing holds still (${restMoved} px moved in 300 ms)`);
@@ -1569,15 +1590,17 @@ await probe(async ({ browser, open }) => {
       const c = document.querySelector('.sv-canvas');
       const scale = c.width / c.clientWidth;
       const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-      const out = { green: 0, red: 0, right: 0 };
+      const out = { green: 0, amber: 0, red: 0, right: 0 };
       for (let p = 0; p < d.length; p += 4) {
         const r = d[p], g = d[p + 1], b = d[p + 2];
         if (Math.max(r, g, b) < 40) continue;
         const green = g > 80 && g - r > 40 && g - b > 15;
         const red = r > 140 && g < 90 && r - g > 70;
+        const amber = r > 150 && g >= 90 && r - b > 80;
         if (green) out.green++;
         if (red) out.red++;
-        if (green || red) out.right = Math.max(out.right, (p / 4) % c.width);
+        if (amber) out.amber++;
+        if (green || red || amber) out.right = Math.max(out.right, (p / 4) % c.width);
       }
       return { ...out, right: Math.round(out.right / scale) };
     });
@@ -1585,17 +1608,32 @@ await probe(async ({ browser, open }) => {
     await emit({ meter: { peak: [0.32, 0], clip: [false, false] } });
     await settle(150);
     const playing = await meterRead();
+    // -30 and -6 dBFS (linear peaks) on the -60..0 scale: the louder input lights more segments.
+    await emit({ meter: { peak: [0.0316, 0], clip: [false, false] } });
+    await settle(150);
+    const quiet = await meterRead();
+    await emit({ meter: { peak: [0.5, 0], clip: [false, false] } });
+    await settle(150);
+    const loud = await meterRead();
+    // Every segment lit (the ladder's full area): the top of the scale, in the colours of its zones.
+    await emit({ meter: { peak: [0.99, 0], clip: [false, false] } });
+    await settle(150);
+    const full = await meterRead();
     await emit({ meter: { peak: [1, 0], clip: [true, false] } });
     await settle(150);
     const clipping = await meterRead();
     await emit({ meter: { peak: [0, 0], clip: [false, false] } });
     await settle(900);
     const after = await meterRead();
-    console.log(JSON.stringify({ silent, playing, clipping, after }));
+    console.log(JSON.stringify({ silent, playing, quiet, loud, full, clipping, after }));
     assert.ok(silent.green === 0 && silent.red === 0, `a silent input lights no segment (${silent.green} green, ${silent.red} red px)`);
     assert.ok(playing.green > 60 && playing.red === 0, `a played input lights IN's ladder green (${playing.green} green, ${playing.red} red px)`);
     assert.ok(playing.right < 110, `IN's ladder sits in the head column (its light reaches x ${playing.right} CSS px)`);
     assert.ok(clipping.red > playing.green && clipping.green === 0, `a clip lights every segment red (${clipping.red} red, ${clipping.green} green px)`);
+    const lit = (m) => m.green + m.amber + m.red;
+    assert.ok(lit(quiet) > 0 && lit(loud) >= lit(quiet) + 28, `a louder input lights at least two more segments (14 px each) (-30 dBFS ${lit(quiet)} px, -6 dBFS ${lit(loud)} px)`);
+    assert.ok(lit(playing) < lit(loud) && lit(full) > lit(loud), `the ladder rises with the level (-10 dBFS ${lit(playing)} px, -6 ${lit(loud)}, 0 ${lit(full)})`);
+    assert.ok(clipping.red >= lit(full) * 0.97 && clipping.green === 0, `a clip lights every segment red, the whole ladder (${clipping.red} red px against ${lit(full)} lit at full scale)`);
     assert.ok(after.green === 0 && after.red === 0, `the ladder falls dark once the input is silent (${after.green} green, ${after.red} red px)`);
   });
 
