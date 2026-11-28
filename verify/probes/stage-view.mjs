@@ -18,7 +18,8 @@
  *   in their colour, a PLAY and an EMPTY chip none; the selected chip carries aria-current and the warm
  *   face; chips never move; no state word, dB, loop seconds or MUTE/REV flag is left in the view.
  * - pixels (per look): the canvas follows the feed: a PLAYING lane draws in the play colour, MUTED in
- *   grey with no play colour, EMPTY near nothing, REC in rec-red, an overdub adds amber; the warm-white
+ *   grey with no play colour, EMPTY near nothing, REC in rec-red, an overdub adds amber (on STRATA over
+ *   a span of columns far wider than its amber playhead: the layer it has written); the warm-white
  *   selection mark moves when a digit selects another lane; at rest the loop is cued at its start (no
  *   playhead moves) while the engine's phase runs on.
  * - scope: the engine's live scope columns, which only the SCOPE look draws and no other group emits.
@@ -54,7 +55,10 @@
  * - controls: the two buttons hide after 3 s without the pointer and return on a pointer move and on a
  *   key; B still exits while they are hidden.
  * - pointer (per look): a press on lane 4's form sends `SelectTrack` 3; a press in Orbit's centre
- *   sends nothing.
+ *   sends nothing, nor one beside the panel card (SCOPE, STRATA) at lane 4's height.
+ * - in-meter: STRATA's IN cell (the head column over lane 1) lights its ladder in meter green while the
+ *   input plays, every segment meter red while it clips, and nothing with the input silent; its light
+ *   stays in the head column.
  * - reduced: with prefers-reduced-motion the chips' animations are off and the canvas holds still
  *   across a scripted beat (it moves without it: the control). On the FIRST look only, and the comment
  *   at the group says what a per-look run needs first.
@@ -72,11 +76,12 @@
  *   look alone (as the `stageNextView` action does there, a pedal's path), and inside it steps the look
  *   and sends the engine nothing but the `SetScope` that step owes; a pad key released with
  *   Shift down still releases its pad.
- * - shots: for the eye, per look and size: a rich scene (four lanes with different loops: playing,
- *   muted, overdubbing, stopped, and one empty), with the engine's live scope columns fed in over the
- *   whole loop and the newest one at the playhead, at three loop phases, a later take recording, an armed
- *   wait, a first take, LISTENING, the count-in and the rest state, in logs/stage-view/, plus tiled
- *   sheets (sheet-<look>-<a|b>.png). The run first empties the folder's PNGs.
+ * - shots: for the eye, per look and size (the three above and the owner's 2560x1440): a rich scene
+ *   (four lanes with different loops: playing, muted, overdubbing, stopped, and one empty), with the
+ *   engine's live scope columns fed in over the whole loop and the newest one at the playhead, at three
+ *   loop phases, a later take recording, an armed wait, a first take, LISTENING, the count-in and the
+ *   rest state, in logs/stage-view/, plus tiled sheets (sheet-<look>-<a|b>.png). The run first empties
+ *   the folder's PNGs.
  *
  * Cannot see the native engine (the looper state machine, count-in, takes, overdubs and refusals are
  * lf-engine's tests), Tauri IPC, WebView2, the GPU the owner's machine draws with, or the distance the
@@ -149,20 +154,28 @@ const LANE1_ONLY = { 0: 0.8 };
  */
 function scopeRig(k) {
   const el = () => document.querySelector('.sv-canvas');
-  /** The scope look's own layout (`src/ui/stage/scope.ts` `layout`): the HUD's band and side padding,
-   * the gutter that carries the bay names, and the hero bay two lane-heights tall. */
+  /** The scope look's own layout (`src/ui/stage/scope.ts` `layout`, the panel's `visual.ts`
+   * `layoutPanel`): the HUD's band and side padding, the head column that carries the bay names (at
+   * least 84 CSS px, else the widest lane number at its size plus 0.28 of that size each side and the
+   * pane's bezel), and the hero bay two lane-heights tall. */
   const geom = () => {
     const c = el();
     const dpr = c.width / c.clientWidth;
     const pad = Math.round(Math.min(24, Math.max(12, 0.02 * c.clientHeight)) * dpr);
-    const x0 = pad + Math.round(84 * dpr);
+    const unit = Math.max(6, Math.floor((0.78 * c.height) / 7));
+    const numPx = Math.round(Math.min(82 * dpr, Math.max(26 * dpr, unit * 0.56)));
+    const m = document.createElement('canvas').getContext('2d');
+    m.font = `650 ${numPx}px 'Instrument Sans', system-ui, sans-serif`;
+    const adv = Math.max(...['1', '2', '3', '4', '5'].map((n) => m.measureText(n).width));
+    const bezel = Math.max(2, Math.round(3 * dpr));
+    const x0 = pad + Math.max(Math.round(84 * dpr), Math.ceil(adv + 2 * 0.28 * numPx) + bezel);
     const frame = Math.round(8 * dpr);
     return {
       dw: c.width,
       dh: c.height,
       dpr,
       top: Math.round(0.1 * c.height),
-      unit: Math.max(6, Math.floor((0.78 * c.height) / 7)),
+      unit,
       x0,
       tw: Math.max(8, c.width - pad - frame - x0),
       cw: (span) => Math.max(1, Math.ceil(((Math.max(8, c.width - pad - frame - x0)) * k.bin) / span)),
@@ -525,7 +538,8 @@ await probe(async ({ browser, open }) => {
     text: document.querySelector('.sv').textContent,
   }));
   /** The stage canvas two frames on, counted by colour family: play green, rec red, dub amber, the
-   * warm-white of the selection, grey (and the `bright` greys among them), and everything above the floor (`lit`); `warmAt` is the mean
+   * warm-white of the selection, grey (and the `bright` greys among them), and everything above the floor (`lit`); `dubCols` the
+   * CSS px of columns that hold amber; `warmAt` is the mean
    * distance of the warm-white pixels from the numeral's anchor and their mean height, in CSS px. */
   const census = () => page.evaluate(async () => {
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -536,16 +550,21 @@ await probe(async ({ browser, open }) => {
     const ay = parseFloat(sv.style.getPropertyValue('--sv-count-y')) * scale;
     const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
     const out = { play: 0, rec: 0, dub: 0, warm: 0, grey: 0, bright: 0, lit: 0 };
+    const dubCol = new Uint16Array(c.width); // amber pixels per column
+    const headCol = new Uint16Array(c.width); // the now line's pixels per column: a bright, unsaturated pixel
     let dist = 0;
     let height = 0;
     for (let p = 0; p < d.length; p += 4) {
       const r = d[p], g = d[p + 1], b = d[p + 2];
       if (Math.max(r, g, b) < 40) continue;
       out.lit++;
+      if (Math.min(r, g, b) > 150 && Math.max(r, g, b) - Math.min(r, g, b) < 60) headCol[(p / 4) % c.width]++;
       if (g > 80 && g - r > 40 && g - b > 15) out.play++;
       else if (r > 140 && g < 90 && r - g > 70) out.rec++;
-      else if (r > 150 && g >= 90 && r - b > 80) out.dub++;
-      else if (r > 200 && g > 195 && b > 180 && r >= b) {
+      else if (r > 150 && g >= 90 && r - b > 80) {
+        out.dub++;
+        dubCol[(p / 4) % c.width]++;
+      } else if (r > 200 && g > 195 && b > 180 && r >= b) {
         out.warm++;
         const x = (p / 4) % c.width, y = Math.floor(p / 4 / c.width);
         dist += Math.hypot(x - ax, y - ay);
@@ -555,7 +574,18 @@ await probe(async ({ browser, open }) => {
         if (g > 85) out.bright++;
       }
     }
-    return { ...out, warmDist: Math.round(dist / Math.max(1, out.warm) / scale), warmY: Math.round(height / Math.max(1, out.warm) / scale) };
+    // The columns holding amber (4 px or more): a playhead's few, or a layer's span.
+    let dubCols = 0;
+    let dubMin = -1, dubMax = -1, nowCol = 0;
+    dubCol.forEach((n, x) => {
+      if (n >= 4) {
+        if (dubMin < 0) dubMin = x;
+        dubMax = x;
+      }
+      if (headCol[x] > headCol[nowCol]) nowCol = x;
+    });
+    for (const n of dubCol) if (n >= 4) dubCols++;
+    return { ...out, nowCol: Math.round(nowCol / scale), dubMin: Math.round(dubMin / scale), dubMax: Math.round(dubMax / scale), dubCols: Math.round(dubCols / scale), warmDist: Math.round(dist / Math.max(1, out.warm) / scale), warmY: Math.round(height / Math.max(1, out.warm) / scale) };
   });
   /** Wait until no lane's slow light can move a pixel any more, and return the shown phase. `light.slow`
    * is a 400 ms follower Strata rounds into a ribbon's height (`rowH * (0.84 + 0.16 * slow)`): a stopped
@@ -819,16 +849,30 @@ await probe(async ({ browser, open }) => {
       await settle(200);
       dubs.push(await census());
       const dub = dubs[0].dub >= dubs[1].dub ? dubs[0] : dubs[1];
+      // The same overdub 700 ms on: its written layer must have grown (at most one of these is a flash frame).
+      await settle(500);
+      dubs.push(await census());
       await laterTake(true, 3 * BAR);
       await settle(300);
       const rec = await census();
-      console.log(JSON.stringify({ view: v.id, empty, play, muted, stop, dub, rec, restMoved, playMoved, phases }));
+      console.log(JSON.stringify({ view: v.id, dubs: dubs.map((d) => [d.nowCol, d.dubMin, d.dubMax, d.dubCols]), empty, play, muted, stop, dub, rec, restMoved, playMoved, phases }));
       assert.ok(play.play > 1500, `PLAYING draws in the play colour (${play.play} px)`);
       assert.ok(empty.play === 0 && empty.lit < play.lit / 3, `EMPTY is near the floor (${empty.lit} lit px against ${play.lit})`);
       assert.ok(muted.play < play.play * 0.02, `MUTED has no play colour left (${muted.play} px)`);
       assert.ok(muted.grey > empty.grey + 500, `MUTED draws its loop in grey (${muted.grey} px against ${empty.grey} empty)`);
       assert.ok(stop.play < play.play * 0.02 && stop.bright > muted.bright + 1000, `STOPPED is grey and brighter than MUTED (${stop.bright} bright grey px against ${muted.bright})`);
       assert.ok(dub.dub > 60 && dub.play > 500, `an overdub adds amber over the loop's green (${dub.dub} amber, ${dub.play} green px)`);
+      // STRATA's playhead alone is amber in the dub's bay, 2 or 3 columns wide: the layer the overdub has
+      // written in its 400 ms or more (about 29 CSS px of the 16 s loop at 1280x820) must span far wider.
+      if (v.id === 'strata') assert.ok(dub.dubCols >= 15, `strata: the overdub's written layer reads amber across ${dub.dubCols} CSS px of columns (want 15 or more: the playhead alone is about 3)`);
+      if (v.id === 'strata') {
+        // The layer lies behind the now line (the playhead's own width and a few px of antialiasing apart) and grows with the take.
+        for (const d of dubs) assert.ok(d.dubMax <= d.nowCol + 6, `strata: no amber right of the now line (amber reaches x ${d.dubMax}, the now line is at ${d.nowCol} CSS px)`);
+        const reach = (d) => d.nowCol - d.dubMin;
+        const early = Math.min(reach(dubs[0]), reach(dubs[1]));
+        const late = reach(dubs[2]);
+        assert.ok(late >= early + 20, `strata: the overdub's layer grows with the take (reaches ${early} CSS px back, then ${late} px 700 ms on; want 20 more)`);
+      }
       assert.ok(rec.rec > 300, `a recording take draws in rec-red (${rec.rec} px)`);
       assert.ok(phases[1] !== phases[0], 'control: the engine phase runs on at rest');
       assert.ok(restMoved < 40, `at rest the drawing holds still (${restMoved} px moved in 300 ms)`);
@@ -1525,10 +1569,73 @@ await probe(async ({ browser, open }) => {
         await page.mouse.click(centre.x, centre.y);
         await settle(150);
         assert.deepEqual(await sent(), [], `${v.id}: a press in the centre hole sends nothing`);
+      } else {
+        // The panel card starts at the HUD's side inset (12 CSS px or more): its gutter is no lane.
+        await clearSent();
+        await page.mouse.click(4, at.y);
+        await settle(150);
+        assert.deepEqual(await sent(), [], `${v.id}: a press beside the panel card, at lane 4's height, sends nothing`);
       }
       console.log(JSON.stringify({ view: v.id, pressedAt: at }));
     });
   }
+
+  await group('in-meter', async () => {
+    await setOpen(true);
+    await showView('strata');
+    /** The canvas's meter-green and meter-red pixels (the census's play and rec families), and how far
+     * right either reaches, in CSS px; all lanes are empty, so nothing else draws in those colours. */
+    const meterRead = () => page.evaluate(async () => {
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const c = document.querySelector('.sv-canvas');
+      const scale = c.width / c.clientWidth;
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      const out = { green: 0, amber: 0, red: 0, right: 0 };
+      for (let p = 0; p < d.length; p += 4) {
+        const r = d[p], g = d[p + 1], b = d[p + 2];
+        if (Math.max(r, g, b) < 40) continue;
+        const green = g > 80 && g - r > 40 && g - b > 15;
+        const red = r > 140 && g < 90 && r - g > 70;
+        const amber = r > 150 && g >= 90 && r - b > 80;
+        if (green) out.green++;
+        if (red) out.red++;
+        if (amber) out.amber++;
+        if (green || red || amber) out.right = Math.max(out.right, (p / 4) % c.width);
+      }
+      return { ...out, right: Math.round(out.right / scale) };
+    });
+    const silent = await meterRead();
+    await emit({ meter: { peak: [0.32, 0], clip: [false, false] } });
+    await settle(150);
+    const playing = await meterRead();
+    // -30 and -6 dBFS (linear peaks) on the -60..0 scale: the louder input lights more segments.
+    await emit({ meter: { peak: [0.0316, 0], clip: [false, false] } });
+    await settle(150);
+    const quiet = await meterRead();
+    await emit({ meter: { peak: [0.5, 0], clip: [false, false] } });
+    await settle(150);
+    const loud = await meterRead();
+    // Every segment lit (the ladder's full area): the top of the scale, in the colours of its zones.
+    await emit({ meter: { peak: [0.99, 0], clip: [false, false] } });
+    await settle(150);
+    const full = await meterRead();
+    await emit({ meter: { peak: [1, 0], clip: [true, false] } });
+    await settle(150);
+    const clipping = await meterRead();
+    await emit({ meter: { peak: [0, 0], clip: [false, false] } });
+    await settle(900);
+    const after = await meterRead();
+    console.log(JSON.stringify({ silent, playing, quiet, loud, full, clipping, after }));
+    assert.ok(silent.green === 0 && silent.red === 0, `a silent input lights no segment (${silent.green} green, ${silent.red} red px)`);
+    assert.ok(playing.green > 60 && playing.red === 0, `a played input lights IN's ladder green (${playing.green} green, ${playing.red} red px)`);
+    assert.ok(playing.right < 110, `IN's ladder sits in the head column (its light reaches x ${playing.right} CSS px)`);
+    assert.ok(clipping.red > playing.green && clipping.green === 0, `a clip lights every segment red (${clipping.red} red, ${clipping.green} green px)`);
+    const lit = (m) => m.green + m.amber + m.red;
+    assert.ok(lit(quiet) > 0 && lit(loud) >= lit(quiet) + 28, `a louder input lights at least two more segments (14 px each) (-30 dBFS ${lit(quiet)} px, -6 dBFS ${lit(loud)} px)`);
+    assert.ok(lit(playing) < lit(loud) && lit(full) > lit(loud), `the ladder rises with the level (-10 dBFS ${lit(playing)} px, -6 ${lit(loud)}, 0 ${lit(full)})`);
+    assert.ok(clipping.red >= lit(full) * 0.97 && clipping.green === 0, `a clip lights every segment red, the whole ladder (${clipping.red} red px against ${lit(full)} lit at full scale)`);
+    assert.ok(after.green === 0 && after.red === 0, `the ladder falls dark once the input is silent (${after.green} green, ${after.red} red px)`);
+  });
 
   // Still on `VIEWS[0]` alone, and that is a measured hole, not a preference: the other two looks'
   // reduced-motion behaviour is checked by nobody, and the CONTROL below (the drawing MUST move while
@@ -1841,11 +1948,13 @@ await probe(async ({ browser, open }) => {
   });
 
   await group('shots', async () => {
+    // The owner's display (a 27" 2560x1440, played standing about 1.5 m off) is shot for the eye too.
+    const shotSizes = [...viewports, [2560, 1440]];
     const GUITAR = { meter: { peak: [0.32, 0], clip: [false, false] } };
     await setOpen(true);
     for (const v of VIEWS) {
       await showView(v.id);
-      for (const [width, height] of viewports) {
+      for (const [width, height] of shotSizes) {
         vp = `${width}x${height}`;
         await page.setViewportSize({ width, height });
         await page.mouse.move(width / 2, height / 2);
@@ -1892,13 +2001,13 @@ await probe(async ({ browser, open }) => {
       await boot(page);
     }
     // Tiled sheets for the eye: per look, sizes across, scenes down.
-    const sheet = await browser.newPage({ viewport: { width: 1900, height: 1000 } });
+    const sheet = await browser.newPage({ viewport: { width: 2560, height: 1000 } });
     for (const v of VIEWS) {
       for (const [part, scenes] of [['a', ['rich-a', 'rich-b', 'rich-c', 'rest']], ['b', ['later-take', 'armed', 'count-in', 'first-take', 'listening']]]) {
         const rows = [];
         for (const scene of scenes) {
           const cells = [];
-          for (const [width, height] of viewports) {
+          for (const [width, height] of shotSizes) {
             const shot = shots.find((s) => s.view === v.id && s.scene === scene && s.vp === `${width}x${height}`);
             if (shot) cells.push(`<figure><img src="data:image/png;base64,${(await readFile(shot.file)).toString('base64')}"><figcaption>${v.id} · ${scene} · ${shot.vp}</figcaption></figure>`);
           }
